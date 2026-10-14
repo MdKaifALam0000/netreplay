@@ -1,0 +1,21 @@
+{
+  "name": "@netreplay/toxiproxy",
+  "version": "1.0.0",
+  "description": "Reusable Toxiproxy engine adapter and fault injection client for NetReplay",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/client.js",
+    "./adapter": "./src/adapter.js",
+    "./validation": "./src/validation.js",
+    "./errors": "./src/errors.js"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "private": true
+}

@@ -1,49 +1,58 @@
-# NetReplay — Step 1: Foundation and Network Fault Injection
+# NetReplay — Step 2: Reusable Toxiproxy Engine Adapter
 
-NetReplay is an open-source network failure reproduction platform designed to help engineers simulate, capture, and reliably replay complex distributed system network faults (latency, packet loss, bandwidth throttles, socket drops, and connection timeouts).
+NetReplay is an open-source network failure reproduction platform designed to help engineers simulate, capture, and reliably replay complex distributed system network faults (latency, packet drops, bandwidth throttles, TCP connection resets, and timeouts).
 
-This repository contains **Step 1: Foundation and Network Fault Injection**, providing a self-contained local Docker Compose environment that pairs a deterministic HTTP test service with Shopify's Toxiproxy engine.
+This repository contains **Step 2: Reusable Toxiproxy Engine Adapter**, building upon the Step 1 infrastructure with a typed, modular, and resilient JavaScript ES module adapter located in `packages/toxiproxy/`.
 
 ---
 
 ## Table of Contents
 
-1. [Architecture Overview](#architecture-overview)
-2. [What Step 1 Implements vs. What is Deferred](#what-step-1-implements-vs-what-is-deferred)
-3. [Prerequisites & Installation](#prerequisites--installation)
-4. [Project Structure](#project-structure)
-5. [Quickstart (Windows PowerShell)](#quickstart-windows-powershell)
-6. [Service Endpoints & API Reference](#service-endpoints--api-reference)
-7. [Inspecting Services and Logs](#inspecting-services-and-logs)
-8. [Toxiproxy HTTP API Guide](#toxiproxy-http-api-guide)
-9. [Running the Smoke Test](#running-the-smoke-test)
-10. [Troubleshooting](#troubleshooting)
+1. [Architecture & Topology](#architecture--topology)
+2. [What Step 2 Adds & Architecture Decisions](#what-step-2-adds--architecture-decisions)
+3. [Control API (:8474) vs. Traffic Proxy Listener (:8666)](#control-api-8474-vs-traffic-proxy-listener-8666)
+4. [Toxiproxy Adapter API & Code Examples](#toxiproxy-adapter-api--code-examples)
+5. [Supported Fault Types & Schemas](#supported-fault-types--schemas)
+6. [Prerequisites & Quickstart](#prerequisites--quickstart)
+7. [Running Tests (Unit, Integration, Smoke)](#running-tests-unit-integration-smoke)
+8. [Manual Inspection & Verification](#manual-inspection--verification)
+9. [Diagnosing Port Failures & Troubleshooting](#diagnosing-port-failures--troubleshooting)
+10. [Known Limitations (TCP Proxy vs. Linux tc-netem)](#known-limitations-tcp-proxy-vs-linux-tc-netem)
 11. [Shutdown and Cleanup](#shutdown-and-cleanup)
-12. [License & Third-Party Dependencies](#license--third-party-dependencies)
+12. [License & Third-Party Notes](#license--third-party-notes)
 
 ---
 
-## Architecture Overview
+## Architecture & Topology
 
 ```
-                      +---------------------------------------------------+
-                      |                   HOST MACHINE                    |
-                      |                                                   |
-                      |   [Developer Machine / PowerShell / Test Script]  |
-                      +---------+------------------+------------------+---+
-                                |                  |                  |
-           Direct Baseline Req  |     Fault-Injected Proxy Req       | Control API
-           (http://127.0.0.1:3000)   (http://127.0.0.1:8666)          | (http://127.0.0.1:8474)
-                                |                  |                  |
-+-------------------------------v------------------v------------------v---+
-| DOCKER BRIDGE NETWORK (`netreplay-network`)                              |
++-------------------------------------------------------------------------+
+|                              HOST MACHINE                               |
+|                                                                         |
+|    [Node.js Runtime / Scripts / Tests / Fastify Service (Step 3)]       |
+|                                  |                                      |
+|    +-----------------------------v---------------------------------+    |
+|    |           packages/toxiproxy (ToxiproxyAdapter)               |    |
+|    |                                                               |    |
+|    |  * validation.js  (Strict schema & parameter bounds checks)   |    |
+|    |  * client.js      (Typed HTTP REST client with AbortSignal)   |    |
+|    |  * adapter.js     (ensureProxy, applyFault, withFault)        |    |
+|    |  * errors.js      (Actionable typed error hierarchy)          |    |
+|    +------------------+------------------------------+-------------+    |
++-----------------------|------------------------------|------------------+
+                        |                              |
+      HTTP Control API  |          Proxied Traffic     | Direct Baseline
+      (:8474)           |          (:8666)             | (:3000)
+                        |                              |
++-----------------------v------------------------------v------------------+
+| DOCKER BRIDGE NETWORK (`netreplay-network`)                             |
 |                                                                         |
 |  +-------------------------+            +----------------------------+  |
-|  |       toxiproxy         |            |        test-target         |  |
+|  |   netreplay-toxiproxy   |            |   netreplay-test-target    |  |
 |  |                         |  TCP Fwd   |                            |  |
-|  |  * Control: :8474       |----------->|  * Port: :3000             |  |
+|  |  * Control API: :8474   |----------->|  * Port: :3000             |  |
 |  |  * Listener: :8666      |            |  * Healthcheck: /health    |  |
-|  |  * Toxic: latency_down  |            |  * Endpoints: /api/demo    |  |
+|  |  * Toxics: latency, etc.|            |  * Endpoints: /api/demo    |  |
 |  +-------------------------+            |               /api/slow    |  |
 |                                         +----------------------------+  |
 +-------------------------------------------------------------------------+
@@ -51,397 +60,247 @@ This repository contains **Step 1: Foundation and Network Fault Injection**, pro
 
 ---
 
-## What Step 1 Implements vs. What is Deferred
+## What Step 2 Adds & Architecture Decisions
 
-### Implemented in Step 1
-- **Deterministic HTTP Test Target** (`services/test-target/server.js`):
-  - Lightweight Node.js server built exclusively with built-in modules (`node:http`, `node:url`).
-  - `/health` endpoint for Docker container readiness checks.
-  - `/api/demo` endpoint returning deterministic JSON and reflecting `requestId`.
-  - `/api/slow` endpoint simulating server-side processing delay with bounded input validation (`0` to `5000` ms).
-  - Production containerization via Dockerfile (`node:22-alpine`) with unprivileged user `node`.
-- **Toxiproxy Integration** (`docker-compose.yml`):
-  - Pinned verified stable official image: `ghcr.io/shopify/toxiproxy:2.12.0`.
-  - Control API isolated to host localhost `127.0.0.1:8474`.
-  - Proxy listener exposed on host localhost `127.0.0.1:8666`.
-  - Internal DNS routing from `toxiproxy` to `test-target:3000` over a private bridge network.
-- **Automated Smoke Test** (`scripts/smoke-test.mjs`):
-  - Pure ES module using Node.js built-in `fetch` and `performance.now()`.
-  - Measures direct baseline (port 3000), proxy clean baseline (port 8666), and injected fault latency (port 8666 with +500ms downstream delay).
-  - Compares median latencies and verifies that the injected fault increased response times beyond a 300ms threshold.
-  - Guaranteed toxic cleanup in a `finally` block.
-- **npm Convenience Scripts**:
-  - `npm run up`, `npm run down`, `npm run logs`, `npm run test:smoke`, `npm run test:smoke:setup`.
-
-### Deferred to Subsequent Steps
-- Fastify application API and backend orchestration.
-- SQLite database with Prisma ORM.
-- React web dashboard and UI visualizations.
-- User authentication and role-based access control.
-- Experiment queue and distributed execution engine.
-- Automated failure-minimization / delta-debugging algorithms.
+1. **Modular Engine Adapter (`packages/toxiproxy/`)**:
+   - `client.js`: Low-level, typed HTTP client communicating with Shopify Toxiproxy v2 REST API using Node.js built-in `fetch` and `AbortController`.
+   - `adapter.js`: Domain orchestrator providing idempotent proxy management (`ensureProxy`), scoped fault lifecycles (`withFault`), and targeted fault cleanup (`clearFaults`).
+   - `validation.js`: Schema validation and parameter bounds checking enforcing safe, bounded fault values.
+   - `errors.js`: Actionable, typed error hierarchy (`ToxiproxyValidationError`, `ToxiproxyNotFoundError`, `ToxiproxyConflictError`, `ToxiproxyTimeoutError`, `ToxiproxyConnectionError`, `ToxiproxyCleanupError`).
+2. **Anti-CSRF User-Agent Handling**:
+   - Toxiproxy v2 automatically rejects requests whose `User-Agent` starts with `Mozilla/` (`403 Forbidden: User agent not allowed`). The adapter and client consistently inject a non-browser header (`NetReplay-EngineAdapter/1.0`).
+3. **Scoped Fault Isolation (`withFault`)**:
+   - Rather than globally resetting the engine or leaving stray toxics behind on failure, `adapter.withFault()` guarantees toxic cleanup in a `finally` block, coordinating both callback errors and cleanup errors without masking either.
+4. **Refactored Smoke Test**:
+   - `scripts/smoke-test.mjs` was refactored to use `ToxiproxyAdapter`, maintaining deterministic measurements while eliminating duplicated HTTP logic.
 
 ---
 
-## Prerequisites & Installation
+## Control API (:8474) vs. Traffic Proxy Listener (:8666)
 
-Before running NetReplay, ensure you have the following installed on your system:
+Understanding the distinction between these two ports is critical when operating NetReplay:
 
-1. **Node.js (LTS v20+ or v22+)**
-   - Download: [https://nodejs.org/](https://nodejs.org/)
-   - Verify in PowerShell:
-     ```powershell
-     node --version
-     npm --version
-     ```
-2. **Docker Desktop for Windows**
-   - Download: [https://www.docker.com/products/docker-desktop/](https://www.docker.com/products/docker-desktop/)
-   - Ensure Docker Desktop is launched and the Linux engine is running.
-   - Verify in PowerShell:
-     ```powershell
-     docker --version
-     docker compose version
-     docker ps
-     ```
-3. **Git**
-   - Download: [https://git-scm.com/](https://git-scm.com/)
+| Characteristic | Control API (`:8474`) | Traffic Proxy Listener (`:8666`) |
+| :--- | :--- | :--- |
+| **Protocol** | HTTP (JSON REST API) | Raw TCP Stream (forwards to `test-target:3000`) |
+| **Purpose** | Inspecting engine, configuring proxies, injecting toxics | Sending application requests to measure fault impact |
+| **Initial State** | Immediately open upon Toxiproxy container boot | **Closed** until `ensureProxy` creates `netreplay-demo` |
+| **User-Agent Requirement** | Rejects `Mozilla/*` (requires non-browser header) | Standard HTTP headers passed transparently |
+| **Client** | `ToxiproxyClient` / `ToxiproxyAdapter` / `curl` | Browser / Test runner / Application client |
 
 ---
 
-## Project Structure
+## Toxiproxy Adapter API & Code Examples
 
+### Example 1: Basic Fault Injection and Manual Removal
+
+```javascript
+import { ToxiproxyAdapter } from './packages/toxiproxy/src/index.js';
+
+const adapter = new ToxiproxyAdapter({ baseUrl: 'http://127.0.0.1:8474' });
+
+// 1. Verify engine health
+const health = await adapter.checkHealth();
+console.log(`Connected to Toxiproxy v${health.version}`);
+
+// 2. Ensure proxy exists and routes traffic (idempotent)
+await adapter.ensureProxy({
+  name: 'netreplay-demo',
+  listen: '0.0.0.0:8666',
+  upstream: 'test-target:3000',
+  enabled: true,
+});
+
+// 3. Apply a 500ms downstream latency fault
+await adapter.applyFault('netreplay-demo', {
+  name: 'custom_latency',
+  type: 'latency',
+  latencyMs: 500,
+  jitterMs: 50,
+  stream: 'downstream',
+});
+
+// ... perform tests through http://127.0.0.1:8666 ...
+
+// 4. Remove the fault when finished
+await adapter.removeFault('netreplay-demo', 'custom_latency');
 ```
-netreplay/
-├── services/
-│   └── test-target/
-│       ├── package.json        # Test-target service metadata
-│       ├── server.js           # Deterministic HTTP server (Node.js built-in)
-│       └── Dockerfile          # Multi-stage production container definition
-├── scripts/
-│   └── smoke-test.mjs          # Automated fault injection verification script
-├── docker-compose.yml          # Container topology (test-target + toxiproxy)
-├── package.json                # Root automation scripts
-├── .gitignore                  # Git ignore rules
-├── .env.example                # Environment variable defaults
-└── README.md                   # Complete documentation
+
+### Example 2: Scoped Execution with Cleanup Guarantee (`withFault`)
+
+`withFault` applies the fault, executes your asynchronous callback, and guarantees toxic removal in a `finally` block even if the callback throws an error:
+
+```javascript
+import { ToxiproxyAdapter } from './packages/toxiproxy/src/index.js';
+
+const adapter = new ToxiproxyAdapter({ baseUrl: 'http://127.0.0.1:8474' });
+
+await adapter.withFault(
+  'netreplay-demo',
+  {
+    type: 'latency',
+    latencyMs: 1000,
+    stream: 'downstream',
+  },
+  async () => {
+    // Traffic sent through http://127.0.0.1:8666 will now experience +1000ms delay
+    const start = performance.now();
+    const res = await fetch('http://127.0.0.1:8666/api/demo');
+    const elapsed = performance.now() - start;
+    console.log(`Observed response time under fault: ${elapsed.toFixed(1)}ms`);
+
+    // Even if an assertion throws here, the fault is GUARANTEED to be removed
+    if (!res.ok) {
+      throw new Error('Endpoint returned error status');
+    }
+  }
+);
+// Fault is cleanly removed at this point
 ```
 
 ---
 
-## Quickstart (Windows PowerShell)
+## Supported Fault Types & Schemas
 
-Open Windows PowerShell in the project directory:
+NetReplay maps internal fault declarations to Toxiproxy toxic definitions with strict validation:
 
-```powershell
-cd c:\Users\alamk\OneDrive\Desktop\netreplay
-```
+### 1. `latency`
+Adds transmission delay to packets.
+- `latencyMs` (*integer, 0 to 60,000*): Milliseconds of added delay.
+- `jitterMs` (*integer, 0 to 30,000, default: 0*): Milliseconds of randomized variance ($\pm \text{jitter}$).
+- `stream` (*string, "upstream" or "downstream", default: "downstream"*): Link direction to affect.
+- `toxicity` (*number, 0.0 to 1.0, default: 1.0*): Probability that packets are delayed.
 
-### 1. (Optional) Create .env from Example
-```powershell
-Copy-Item .env.example .env
-```
+### 2. `timeout`
+Stalls all connection data and closes the TCP socket after the specified timeout.
+- `timeoutMs` (*integer, 0 to 60,000*): Delay in milliseconds before closing connection. If `0`, connection stalls indefinitely without closing until toxic is removed.
+- `stream` (*string, default: "downstream"*): Direction.
+- `toxicity` (*number, default: 1.0*): Probability.
 
-### 2. Start the Environment
+> [!NOTE]
+> **Timeout vs. Client Request Deadline**: Toxiproxy's timeout toxic simulates connection transport stalling and delayed socket closure. This is distinct from an HTTP client's `AbortSignal` timeout, which is enforced locally on the caller.
+
+### 3. `bandwidth`
+Throttles connection throughput.
+- `rateKbps` (*integer, 1 to 1,000,000*): Maximum rate in kilobytes per second.
+- `stream` (*string, default: "downstream"*): Direction.
+- `toxicity` (*number, default: 1.0*): Probability.
+
+### 4. `reset` / `reset_peer`
+Simulates sudden connection termination by issuing a TCP `RST` (connection reset by peer) without performing a standard TCP `FIN` handshake.
+- `stream` (*string, default: "downstream"*): Direction.
+- `toxicity` (*number, default: 1.0*): Probability.
+
+---
+
+## Prerequisites & Quickstart
+
+### Prerequisites
+- Node.js LTS (v20+ or v22+)
+- Docker Desktop for Windows (running)
+
+### Start Docker Containers
 ```powershell
 npm run up
 ```
-*(Equivalent to: `docker compose up -d --build`)*
+*(Runs `docker compose up -d --build`)*
 
-This builds the `test-target` image, pulls `ghcr.io/shopify/toxiproxy:2.12.0`, and launches both services in the background.
-
-### 3. Run the Network Fault Smoke Test
-```powershell
-npm run test:smoke
-```
-*(Equivalent to: `node scripts/smoke-test.mjs`)*
-
----
-
-## Service Endpoints & API Reference
-
-| Service | Host URL | Description |
-| :--- | :--- | :--- |
-| **Direct Test Target** | `http://127.0.0.1:3000` | Baseline test target without any proxy intervention. |
-| **Toxiproxy Listener** | `http://127.0.0.1:8666` | Fault-injected proxy route (forwards to `test-target:3000`). |
-| **Toxiproxy Control** | `http://127.0.0.1:8474` | Toxiproxy HTTP REST API for managing proxies and toxics. |
-
-### Test Target Endpoints
-
-#### 1. `GET /health`
-Returns HTTP 200 indicating service health and uptime.
-```powershell
-Invoke-RestMethod -Uri "http://127.0.0.1:3000/health"
-```
-**Sample Response:**
-```json
-{
-  "status": "ok",
-  "service": "test-target",
-  "healthy": true,
-  "uptimeSeconds": 42
-}
-```
-
-#### 2. `GET /api/demo?requestId=<ID>`
-Returns deterministic JSON echoing the optional request identifier.
-```powershell
-Invoke-RestMethod -Uri "http://127.0.0.1:3000/api/demo?requestId=demo-101"
-```
-**Sample Response:**
-```json
-{
-  "status": "ok",
-  "service": "test-target",
-  "message": "NetReplay deterministic test target response",
-  "requestId": "demo-101",
-  "timestamp": "2026-10-14T15:30:00.000Z",
-  "_documentation": {
-    "determinism": "Payload structure and message are deterministic across runs.",
-    "nondeterministicFields": ["timestamp"],
-    "description": "The timestamp field reflects server time for request inspection."
-  }
-}
-```
-
-#### 3. `GET /api/slow?delay=<MS>`
-Simulates server-side application processing latency (bounded between `0` and `5000` ms).
-```powershell
-# Safe 200ms delay
-Invoke-RestMethod -Uri "http://127.0.0.1:3000/api/slow?delay=200"
-
-# Rejection when delay exceeds maximum allowed limit
-Invoke-RestMethod -Uri "http://127.0.0.1:3000/api/slow?delay=9999" -SkipHttpErrorCheck
-```
-
----
-
-## Inspecting Services and Logs
-
-### Check Running Containers
+Verify services are running:
 ```powershell
 docker compose ps
 ```
 
-### View Live Aggregated Logs
-```powershell
-npm run logs
-```
-*(Press `Ctrl + C` to stop following logs).*
-
-### View Specific Service Logs
-```powershell
-# Test-target logs only
-docker compose logs -f test-target
-
-# Toxiproxy logs only
-docker compose logs -f toxiproxy
-```
-
 ---
 
-## Toxiproxy HTTP API Guide
+## Running Tests (Unit, Integration, Smoke)
 
-Toxiproxy communicates via a JSON REST API on port `8474`.
-
-> [!NOTE]
-> **Windows PowerShell User-Agent Note**: Toxiproxy includes built-in anti-CSRF protection that blocks requests with browser-like user agents (e.g., headers starting with `Mozilla/`). Because Windows PowerShell 5.1 sends `Mozilla/5.0...` by default, always include `-UserAgent "NetReplay/1.0"` when calling `Invoke-RestMethod` on port 8474, or use `curl.exe`.
-
-### 1. Check Toxiproxy Version
+### 1. Unit Tests (Isolated, No Docker Required)
+Runs 37 offline unit tests with mock fetch dispatchers testing URL validation, schema checking, bounds enforcement, error mapping, and `withFault` cleanup:
 ```powershell
-Invoke-RestMethod -Uri "http://127.0.0.1:8474/version" -UserAgent "NetReplay/1.0"
-# Or using curl.exe:
-curl.exe http://127.0.0.1:8474/version
+npm run test:unit
 ```
 
-### 2. List Configured Proxies
+### 2. Live Integration Tests (Requires Running Docker)
+Runs live integration tests against the active Toxiproxy engine on `127.0.0.1:8474`:
 ```powershell
-Invoke-RestMethod -Uri "http://127.0.0.1:8474/proxies" -UserAgent "NetReplay/1.0" | ConvertTo-Json -Depth 4
-# Or using curl.exe:
-curl.exe http://127.0.0.1:8474/proxies
+npm run test:integration
 ```
 
-### 3. Create the Proxy (if not already created)
-```powershell
-$body = @{
-    name = "netreplay-demo"
-    listen = "0.0.0.0:8666"
-    upstream = "test-target:3000"
-    enabled = $true
-} | ConvertTo-Json
-
-Invoke-RestMethod -Uri "http://127.0.0.1:8474/proxies" -Method Post -Body $body -ContentType "application/json" -UserAgent "NetReplay/1.0"
-```
-
-### 4. Inject 500ms Downstream Latency
-```powershell
-$toxic = @{
-    name = "latency_downstream"
-    type = "latency"
-    stream = "downstream"
-    toxicity = 1.0
-    attributes = @{
-        latency = 500
-        jitter = 0
-    }
-} | ConvertTo-Json
-
-Invoke-RestMethod -Uri "http://127.0.0.1:8474/proxies/netreplay-demo/toxics" -Method Post -Body $toxic -ContentType "application/json" -UserAgent "NetReplay/1.0"
-```
-
-### 5. Remove the Latency Toxic
-```powershell
-Invoke-RestMethod -Uri "http://127.0.0.1:8474/proxies/netreplay-demo/toxics/latency_downstream" -Method Delete -UserAgent "NetReplay/1.0"
-```
-
-
----
-
-## Running the Smoke Test
-
-Execute the automated smoke test:
+### 3. Smoke Test (End-to-End Fault Verification)
+Runs the end-to-end smoke test measuring direct baseline, clean proxy baseline, and 500ms injected latency:
 ```powershell
 npm run test:smoke
 ```
 
-### Expected Output
-```text
-================================================================
-              NetReplay Network Fault Injection Test            
-================================================================
-Target Direct URL : http://127.0.0.1:3000
-Toxiproxy Listener: http://127.0.0.1:8666
-Toxiproxy Control : http://127.0.0.1:8474
-Sample Count      : 10 requests per phase
-Target Fault      : +500ms downstream latency
-----------------------------------------------------------------
-[*] Checking readiness for Test Target Server (http://127.0.0.1:3000/health)... [READY] (in 24ms)
-[*] Checking readiness for Toxiproxy Engine (http://127.0.0.1:8474/version)... [READY] (in 8ms)
-[+] Proxy 'netreplay-demo' is configured: [::]:8666 -> test-target:3000
+---
 
---- Phase: Baseline Direct (No Proxy) (10 requests) ---
-  [Req  1/10] PASS 3.2 ms (id=direct-01)
-  [Req  2/10] PASS 1.8 ms (id=direct-02)
-  ...
-  [Req 10/10] PASS 1.5 ms (id=direct-10)
+## Manual Inspection & Verification
 
---- Phase: Baseline Proxy (No Fault) (10 requests) ---
-  [Req  1/10] PASS 4.1 ms (id=proxy-01)
-  [Req  2/10] PASS 2.5 ms (id=proxy-02)
-  ...
-  [Req 10/10] PASS 2.2 ms (id=proxy-10)
+### PowerShell Session Setup
+To avoid typing `-UserAgent` on every manual request, configure PowerShell's default parameter values:
+```powershell
+$PSDefaultParameterValues['Invoke-RestMethod:UserAgent'] = 'NetReplay/1.0'
+```
 
-[*] Applying fault: adding 500ms latency toxic via Toxiproxy API...
-[+] Latency toxic 'latency_downstream' injected: +500ms downstream delay.
+### Check Version & Configured Proxies
+```powershell
+# Version check
+Invoke-RestMethod -Uri "http://127.0.0.1:8474/version"
 
---- Phase: Proxy With Fault (+500ms Latency) (10 requests) ---
-  [Req  1/10] PASS 504.8 ms (id=fault-01)
-  [Req  2/10] PASS 502.1 ms (id=fault-02)
-  ...
-  [Req 10/10] PASS 503.4 ms (id=fault-10)
+# Inspect active proxies
+Invoke-RestMethod -Uri "http://127.0.0.1:8474/proxies" | ConvertTo-Json -Depth 5
+```
 
-================================================================
-                     MEASUREMENT SUMMARY                        
-================================================================
-Phase                         Success           Min         Median          Mean           Max
-------------------------------------------------------------------------------------------
-1. Direct Baseline              10/10       1.5 ms         1.9 ms        2.1 ms        3.2 ms
-2. Proxy Baseline (Clean)       10/10       2.1 ms         2.5 ms        2.7 ms        4.1 ms
-3. Proxy With Injected Fault    10/10     501.8 ms       503.2 ms      503.4 ms      506.1 ms
-------------------------------------------------------------------------------------------
-Proxy Baseline Median      : 2.50 ms
-Fault-Injected Median      : 503.20 ms
-Observed Median Delta (Δ)  : +500.70 ms
-Expected Latency Addition  : ~500 ms
-Acceptance Threshold (Min) : +300 ms
-------------------------------------------------------------------------------------------
-
-================================================================
-  >>> RESULT: PASS - Network Fault Injection Confirmed! <<<
-================================================================
-Verified that injecting 500ms latency downstream produced an observed median latency increase of +500.7ms (threshold: >= 300ms).
-
-[*] Cleaning up environment: removing latency toxic...
-[+] Latency toxic removed successfully. Environment restored to clean state.
+### Send Request Through Proxy
+```powershell
+Invoke-RestMethod -Uri "http://127.0.0.1:8666/api/demo?requestId=test-01"
 ```
 
 ---
 
-## Troubleshooting
+## Diagnosing Port Failures & Troubleshooting
 
-### 1. `failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine`
-- **Cause**: Docker Desktop is installed on Windows but is not currently running.
-- **Fix**: Open the **Docker Desktop** application from the Windows Start menu. Wait until the status in the bottom left indicates "Engine running" before re-running `npm run up`.
+### Problem 1: `The connection was closed unexpectedly` on Port 8666
+- **Diagnosis**: Port 8666 is the proxy traffic port. When Toxiproxy first boots, it has an empty proxy list. Nothing is bound to container port 8666 until `ensureProxy` creates `netreplay-demo`.
+- **Resolution**: Run `npm run test:smoke` or call `adapter.ensureProxy(...)` once to register the route.
 
-### 2. Port Conflict (`Bind for 0.0.0.0:3000 failed: port is already allocated`)
-- **Cause**: Another local process (e.g., a dev server) is using port 3000, 8474, or 8666.
-- **Fix**:
-  1. Identify the conflicting process in PowerShell:
-     ```powershell
-     Get-NetTCPConnection -LocalPort 3000, 8474, 8666 -ErrorAction SilentlyContinue | Select-Object LocalAddress, LocalPort, OwningProcess
-     ```
-  2. Or override ports in your `.env` file:
-     ```env
-     TEST_TARGET_PORT=3001
-     TOXIPROXY_CONTROL_PORT=8475
-     TOXIPROXY_LISTEN_PORT=8667
-     ```
+### Problem 2: `Invoke-RestMethod : User agent not allowed` on Port 8474
+- **Diagnosis**: Toxiproxy includes anti-CSRF protection that blocks user-agents starting with `Mozilla/`. Windows PowerShell 5.1 sends `Mozilla/5.0...` by default.
+- **Resolution**: Run `$PSDefaultParameterValues['Invoke-RestMethod:UserAgent'] = 'NetReplay/1.0'` or use `curl.exe`.
 
-### 3. Toxic Left Active After Interrupted Test
-- **Cause**: The test script was force-killed (`Ctrl+C`) before the `finally` block completed.
-- **Fix**: Reset Toxiproxy back to clean state:
+### Problem 3: Stray Toxic Left Behind After Interrupted Process
+- **Diagnosis**: An experiment was forcefully killed (`Ctrl + C`) before cleanup completed.
+- **Resolution**: Clear toxics on the proxy without resetting other proxies:
   ```powershell
-  Invoke-RestMethod -Uri "http://127.0.0.1:8474/reset" -Method Post
-  ```
-  *(The `POST /reset` endpoint removes all toxics and reenables all proxies).*
-
-### 4. `The underlying connection was closed: The connection was closed unexpectedly` (Port 8666)
-- **Cause**: Port 8666 is the Toxiproxy fault listener. When Toxiproxy first boots, it starts with an empty proxy list. Nothing listens on port 8666 until the `netreplay-demo` proxy is registered.
-- **Fix**: Run the smoke test or create the proxy once via the Toxiproxy API:
-  ```powershell
-  npm run test:smoke
-  ```
-  After `smoke-test.mjs` runs, `netreplay-demo` is registered and `http://127.0.0.1:8666` routes to `test-target:3000`.
-
-### 5. `Invoke-RestMethod : User agent not allowed` (Port 8474)
-- **Cause**: Toxiproxy includes built-in anti-CSRF protection that blocks browser user-agents (e.g. `Mozilla/5.0...`). Windows PowerShell 5.1 sends a `Mozilla/5.0...` user agent by default.
-- **Fix**: Provide a custom user-agent flag or use `curl.exe`:
-  ```powershell
-  Invoke-RestMethod -Uri "http://127.0.0.1:8474/proxies" -UserAgent "NetReplay/1.0"
-  # Or:
-  curl.exe http://127.0.0.1:8474/proxies
+  # Using curl:
+  curl.exe -X DELETE -H "User-Agent: NetReplay/1.0" http://127.0.0.1:8474/proxies/netreplay-demo/toxics/latency_downstream
+  
+  # Or perform a complete engine reset:
+  curl.exe -X POST -H "User-Agent: NetReplay/1.0" http://127.0.0.1:8474/reset
   ```
 
-### 6. Container Unhealthy / Startup Timeout
-- Check service health status:
-  ```powershell
-  docker compose ps
-  ```
-- View container logs for errors:
-  ```powershell
-  docker compose logs test-target
-  ```
+---
 
+## Known Limitations (TCP Proxy vs. Linux tc-netem)
+
+NetReplay Step 2 uses Toxiproxy, which operates as an **application-layer TCP proxy**:
+1. **L7/L4 Stream Manipulation**: Toxiproxy buffers and delays application byte streams over established TCP connections.
+2. **Not Kernel Packet Emulation**: It does not modify kernel routing tables or execute Linux `tc` (Traffic Control) `netem` queueing disciplines. Low-level ICMP drops, MTU fragmentation, and out-of-order IP packet reordering at the kernel network interface level require Linux privileges (`CAP_NET_ADMIN`) and are not simulated by Toxiproxy.
+3. **Connection Drops vs. Silent Packet Blackholes**: A Toxiproxy `reset` sends an immediate TCP `RST` segment. Simulating a silent network partition (where packets are silently dropped without RST or FIN) can be achieved using the `timeout` toxic with `timeout: 0`.
 
 ---
 
 ## Shutdown and Cleanup
 
-To stop and remove containers and networks created by Docker Compose:
-
+To tear down all containers and networks:
 ```powershell
 npm run down
-```
-*(Equivalent to: `docker compose down`)*
-
-To also remove any built container images:
-```powershell
-docker compose down --rmi local
 ```
 
 ---
 
-## License & Third-Party Dependencies
+## License & Third-Party Notes
 
 - **NetReplay**: Open-source under the MIT License.
-- **Shopify Toxiproxy**: Open-source framework developed by Shopify under the MIT License ([https://github.com/Shopify/toxiproxy](https://github.com/Shopify/toxiproxy)). Pinned Docker image: `ghcr.io/shopify/toxiproxy:2.12.0`.
-- **Node.js**: Open-source runtime governed by the Node.js Foundation ([https://nodejs.org](https://nodejs.org)).
+- **Shopify Toxiproxy**: Official open-source project by Shopify under the MIT License ([https://github.com/Shopify/toxiproxy](https://github.com/Shopify/toxiproxy)). Container image pinned: `ghcr.io/shopify/toxiproxy:2.12.0`.
+- **Node.js**: Distributed under the Node.js open-source license ([https://nodejs.org](https://nodejs.org)).

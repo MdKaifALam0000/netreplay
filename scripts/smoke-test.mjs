@@ -1,23 +1,24 @@
 #!/usr/bin/env node
 /**
- * NetReplay Smoke Test Script
+ * NetReplay Smoke Test Script (Refactored for Step 2)
  *
  * Validates baseline connectivity and verifies network fault injection
- * using Shopify Toxiproxy and the deterministic test-target service.
+ * using the reusable ToxiproxyAdapter package and deterministic test-target service.
  *
  * Execution flow:
- * 1. Pre-flight verification (test-target & toxiproxy control API readiness)
- * 2. Idempotent proxy configuration ('netreplay-demo' -> 'test-target:3000')
- * 3. Pre-test cleanup (removes any existing toxics)
- * 4. Baseline direct measurements (Direct target: 127.0.0.1:3000)
- * 5. Baseline proxy measurements (Toxiproxy: 127.0.0.1:8666, no fault)
- * 6. Fault injection (500ms downstream latency via Toxiproxy API)
- * 7. Fault-injected proxy measurements (Toxiproxy: 127.0.0.1:8666)
- * 8. Statistical evaluation & assertion (Median delta >= 300ms)
- * 9. Finally block cleanup (guaranteed toxic removal)
+ * 1. Pre-flight verification (target & Toxiproxy adapter checkHealth())
+ * 2. Idempotent proxy provisioning via adapter.ensureProxy()
+ * 3. Pre-test cleanup via adapter.removeFault()
+ * 4. Phase 1: Baseline direct measurements (127.0.0.1:3000)
+ * 5. Phase 2: Baseline proxy measurements without faults (127.0.0.1:8666)
+ * 6. Fault injection via adapter.applyFault() (+500ms downstream latency)
+ * 7. Phase 3: Fault-injected proxy measurements (127.0.0.1:8666)
+ * 8. Statistical evaluation & delta threshold assertion (>= 300ms)
+ * 9. Guaranteed cleanup in finally block via adapter.removeFault()
  */
 
 import { performance } from 'node:perf_hooks';
+import { ToxiproxyAdapter } from '../packages/toxiproxy/src/index.js';
 
 // Environment-configurable addresses with stable local defaults
 const TARGET_URL = process.env.TARGET_URL || 'http://127.0.0.1:3000';
@@ -32,6 +33,12 @@ const SAMPLE_COUNT = 10;
 const LATENCY_TOLERANCE_THRESHOLD_MS = 300; // Expected ~500ms, threshold 300ms
 const REQUEST_TIMEOUT_MS = 5000;
 const READINESS_TIMEOUT_MS = 15000;
+
+// Initialize reusable Toxiproxy adapter with custom User-Agent
+const adapter = new ToxiproxyAdapter({
+  baseUrl: CONTROL_URL,
+  userAgent: 'NetReplay-SmokeTest/1.0',
+});
 
 /**
  * Performs an HTTP fetch with a strict timeout and detailed error diagnostics.
@@ -62,15 +69,14 @@ async function timedFetch(url, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
 }
 
 /**
- * Polls an HTTP endpoint until it responds with HTTP 200 or timeout expires.
+ * Polls the test target health endpoint until ready or timeout expires.
  *
- * @param {string} name
  * @param {string} url
  * @param {number} maxWaitMs
  */
-async function waitForReadiness(name, url, maxWaitMs = READINESS_TIMEOUT_MS) {
+async function waitForTargetReadiness(url, maxWaitMs = READINESS_TIMEOUT_MS) {
   const startTime = performance.now();
-  process.stdout.write(`[*] Checking readiness for ${name} (${url})... `);
+  process.stdout.write(`[*] Checking readiness for Test Target Server (${url})... `);
 
   while (performance.now() - startTime < maxWaitMs) {
     try {
@@ -80,126 +86,45 @@ async function waitForReadiness(name, url, maxWaitMs = READINESS_TIMEOUT_MS) {
         return;
       }
     } catch {
-      // Endpoint not ready yet; back off briefly
+      // Endpoint not ready yet; wait and retry
     }
     await new Promise((r) => setTimeout(r, 500));
   }
 
   console.log('[TIMEOUT]');
   throw new Error(
-    `Readiness check timed out for ${name} (${url}) after ${maxWaitMs}ms.\n` +
+    `Readiness check timed out for Test Target (${url}) after ${maxWaitMs}ms.\n` +
     `Ensure Docker Compose is running: 'npm run up' or 'docker compose up -d'`
   );
 }
 
 /**
- * Ensures the Toxiproxy proxy exists and points to test-target:3000.
- * Idempotent: creates if missing, updates if modified, preserves if intact.
- */
-async function ensureProxyConfigured() {
-  const checkUrl = `${CONTROL_URL}/proxies/${PROXY_NAME}`;
-  const res = await timedFetch(checkUrl, { method: 'GET' }, 2000);
-
-  if (res.status === 200) {
-    const data = await res.json();
-    if (!data.enabled) {
-      console.log(`[*] Proxy '${PROXY_NAME}' is currently disabled. Enabling it...`);
-      const enableRes = await timedFetch(checkUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enabled: true }),
-      });
-      if (!enableRes.ok) {
-        throw new Error(`Failed to enable proxy '${PROXY_NAME}': HTTP ${enableRes.status}`);
-      }
-    }
-    console.log(`[+] Proxy '${PROXY_NAME}' is configured: ${data.listen} -> ${data.upstream}`);
-    return;
-  }
-
-  if (res.status === 404) {
-    console.log(`[*] Proxy '${PROXY_NAME}' does not exist. Creating proxy...`);
-    const createUrl = `${CONTROL_URL}/proxies`;
-    const payload = {
-      name: PROXY_NAME,
-      listen: '0.0.0.0:8666',
-      upstream: 'test-target:3000',
-      enabled: true,
-    };
-
-    const createRes = await timedFetch(createUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-
-    if (!createRes.ok) {
-      const errText = await createRes.text();
-      throw new Error(`Failed to create proxy '${PROXY_NAME}': HTTP ${createRes.status} - ${errText}`);
-    }
-
-    const created = await createRes.json();
-    console.log(`[+] Proxy '${PROXY_NAME}' created successfully: ${created.listen} -> ${created.upstream}`);
-    return;
-  }
-
-  throw new Error(`Unexpected status checking proxy '${PROXY_NAME}': HTTP ${res.status}`);
-}
-
-/**
- * Removes the latency toxic from the proxy if present.
- * Idempotent: succeeds whether the toxic was active or not.
- */
-async function removeLatencyToxic() {
-  const toxicUrl = `${CONTROL_URL}/proxies/${PROXY_NAME}/toxics/${TOXIC_NAME}`;
-  try {
-    const res = await timedFetch(toxicUrl, { method: 'DELETE' }, 2000);
-    if (res.status === 200 || res.status === 204 || res.status === 404) {
-      return true;
-    }
-    console.warn(`[!] Warning: Unexpected status while removing toxic: HTTP ${res.status}`);
-    return false;
-  } catch (err) {
-    console.warn(`[!] Warning: Failed to remove toxic '${TOXIC_NAME}': ${err.message}`);
-    return false;
-  }
-}
-
-/**
- * Injects a downstream latency toxic via the Toxiproxy HTTP API.
+ * Polls Toxiproxy engine readiness via adapter.checkHealth().
  *
- * @param {number} latencyMs
- * @param {number} jitterMs
+ * @param {number} maxWaitMs
  */
-async function injectLatencyToxic(latencyMs = INJECTED_LATENCY_MS, jitterMs = INJECTED_JITTER_MS) {
-  const toxicUrl = `${CONTROL_URL}/proxies/${PROXY_NAME}/toxics`;
-  const payload = {
-    name: TOXIC_NAME,
-    type: 'latency',
-    stream: 'downstream',
-    toxicity: 1.0,
-    attributes: {
-      latency: latencyMs,
-      jitter: jitterMs,
-    },
-  };
+async function waitForAdapterReadiness(maxWaitMs = READINESS_TIMEOUT_MS) {
+  const startTime = performance.now();
+  process.stdout.write(`[*] Checking readiness for Toxiproxy Engine via Adapter (${CONTROL_URL})... `);
 
-  const res = await timedFetch(toxicUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(
-      `Failed to inject latency toxic via Toxiproxy API: HTTP ${res.status}\n` +
-      `Response: ${errText}`
-    );
+  while (performance.now() - startTime < maxWaitMs) {
+    try {
+      const health = await adapter.checkHealth();
+      if (health.healthy) {
+        console.log(`[READY] (v${health.version} in ${Math.round(performance.now() - startTime)}ms)`);
+        return;
+      }
+    } catch {
+      // Engine not ready yet
+    }
+    await new Promise((r) => setTimeout(r, 500));
   }
 
-  const toxic = await res.json();
-  console.log(`[+] Latency toxic '${toxic.name}' injected: +${toxic.attributes.latency}ms downstream delay.`);
+  console.log('[TIMEOUT]');
+  throw new Error(
+    `Readiness check timed out for Toxiproxy at ${CONTROL_URL} after ${maxWaitMs}ms.\n` +
+    `Ensure Docker Compose is running: 'npm run up' or 'docker compose up -d'`
+  );
 }
 
 /**
@@ -303,7 +228,7 @@ function formatStatsRow(label, result) {
  */
 async function main() {
   console.log('================================================================');
-  console.log('              NetReplay Network Fault Injection Test            ');
+  console.log('        NetReplay Smoke Test (Powered by ToxiproxyAdapter)      ');
   console.log('================================================================');
   console.log(`Target Direct URL : ${TARGET_URL}`);
   console.log(`Toxiproxy Listener: ${PROXY_URL}`);
@@ -320,14 +245,20 @@ async function main() {
 
   try {
     // Step 1: Pre-flight readiness verification
-    await waitForReadiness('Test Target Server', `${TARGET_URL}/health`);
-    await waitForReadiness('Toxiproxy Engine', `${CONTROL_URL}/version`);
+    await waitForTargetReadiness(`${TARGET_URL}/health`);
+    await waitForAdapterReadiness();
 
-    // Step 2: Idempotent proxy configuration
-    await ensureProxyConfigured();
+    // Step 2: Idempotent proxy configuration using ToxiproxyAdapter
+    const proxy = await adapter.ensureProxy({
+      name: PROXY_NAME,
+      listen: '0.0.0.0:8666',
+      upstream: 'test-target:3000',
+      enabled: true,
+    });
+    console.log(`[+] Proxy '${proxy.name}' is verified: ${proxy.listen} -> ${proxy.upstream}`);
 
-    // Step 3: Ensure clean slate (no toxics before baseline)
-    await removeLatencyToxic();
+    // Step 3: Clean slate before baseline
+    await adapter.removeFault(PROXY_NAME, TOXIC_NAME);
 
     // Step 4: Phase 1 - Direct target baseline measurement
     directBaseline = await executeMeasurementBatch(
@@ -345,9 +276,16 @@ async function main() {
       'proxy'
     );
 
-    // Step 6: Inject fault
-    console.log(`\n[*] Applying fault: adding ${INJECTED_LATENCY_MS}ms latency toxic via Toxiproxy API...`);
-    await injectLatencyToxic(INJECTED_LATENCY_MS, INJECTED_JITTER_MS);
+    // Step 6: Inject fault using ToxiproxyAdapter
+    console.log(`\n[*] Applying fault: adding ${INJECTED_LATENCY_MS}ms latency via ToxiproxyAdapter...`);
+    const appliedToxic = await adapter.applyFault(PROXY_NAME, {
+      name: TOXIC_NAME,
+      type: 'latency',
+      latencyMs: INJECTED_LATENCY_MS,
+      jitterMs: INJECTED_JITTER_MS,
+      stream: 'downstream',
+    });
+    console.log(`[+] Latency toxic '${appliedToxic.name}' applied (+${appliedToxic.attributes.latency}ms delay).`);
 
     // Step 7: Phase 3 - Proxy with injected latency
     faultProxyResult = await executeMeasurementBatch(
@@ -417,13 +355,17 @@ async function main() {
       console.error(`Reason: ${failureReason}`);
     }
   } finally {
-    // Step 9: Guaranteed cleanup in finally block
-    console.log('\n[*] Cleaning up environment: removing latency toxic...');
-    const cleaned = await removeLatencyToxic();
-    if (cleaned) {
-      console.log('[+] Latency toxic removed successfully. Environment restored to clean state.');
-    } else {
-      console.warn('[!] Note: Toxic was already removed or could not be contacted.');
+    // Step 9: Guaranteed cleanup in finally block using adapter
+    console.log('\n[*] Cleaning up environment: removing latency toxic via adapter...');
+    try {
+      const removed = await adapter.removeFault(PROXY_NAME, TOXIC_NAME);
+      if (removed) {
+        console.log('[+] Latency toxic removed successfully. Environment restored to clean state.');
+      } else {
+        console.log('[*] Toxic was already removed.');
+      }
+    } catch (cleanupErr) {
+      console.warn(`[!] Warning: Failed to clean up toxic '${TOXIC_NAME}': ${cleanupErr.message}`);
     }
   }
 

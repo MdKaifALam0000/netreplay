@@ -1,0 +1,14 @@
+{
+  "name": "netreplay-test-target",
+  "version": "1.0.0",
+  "description": "Deterministic HTTP test target service for NetReplay fault injection testing",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "private": true
+}

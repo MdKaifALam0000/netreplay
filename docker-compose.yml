@@ -1,0 +1,41 @@
+services:
+  test-target:
+    build:
+      context: ./services/test-target
+      dockerfile: Dockerfile
+    container_name: netreplay-test-target
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${TEST_TARGET_PORT:-3000}:3000"
+    environment:
+      - PORT=3000
+      - HOST=0.0.0.0
+      - NODE_ENV=production
+    networks:
+      - netreplay-network
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r => r.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 3s
+
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.12.0
+    container_name: netreplay-toxiproxy
+    restart: unless-stopped
+    ports:
+      # Toxiproxy Control API bound strictly to localhost loopback
+      - "127.0.0.1:${TOXIPROXY_CONTROL_PORT:-8474}:8474"
+      # Proxied listener bound to localhost loopback for fault-injected testing
+      - "127.0.0.1:${TOXIPROXY_LISTEN_PORT:-8666}:8666"
+    networks:
+      - netreplay-network
+    depends_on:
+      test-target:
+        condition: service_healthy
+
+networks:
+  netreplay-network:
+    name: netreplay-network
+    driver: bridge

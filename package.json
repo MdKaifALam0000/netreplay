@@ -1,0 +1,18 @@
+{
+  "name": "netreplay",
+  "version": "0.1.0",
+  "description": "NetReplay - Open-source network failure reproduction platform",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "up": "docker compose up -d --build",
+    "down": "docker compose down",
+    "logs": "docker compose logs -f",
+    "test:smoke": "node scripts/smoke-test.mjs",
+    "test:smoke:setup": "docker compose up -d --build && node scripts/smoke-test.mjs",
+    "target:start": "npm --prefix services/test-target start"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

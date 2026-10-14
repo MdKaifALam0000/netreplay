@@ -313,6 +313,35 @@ export const RunDetailsPage: React.FC = () => {
         </div>
       </div>
 
+      {/* Error or Cleanup Failure Alert Banner */}
+      {(run.errorMessage || run.errorCode) && (
+        <div
+          className={`p-4 rounded-xl border flex items-start gap-3 ${
+            run.errorCode === 'CLEANUP_FAILED'
+              ? 'bg-amber-950/40 border-amber-800/80 text-amber-200'
+              : 'bg-rose-950/40 border-rose-800/80 text-rose-200'
+          }`}
+        >
+          <AlertTriangle
+            className={`w-5 h-5 shrink-0 mt-0.5 ${
+              run.errorCode === 'CLEANUP_FAILED' ? 'text-amber-400' : 'text-rose-400'
+            }`}
+          />
+          <div className="space-y-1">
+            <h4 className="text-sm font-semibold">
+              {run.errorCode === 'CLEANUP_FAILED' ? 'Fault Cleanup Failure' : 'Experiment Failure'} (
+              {run.errorCode || 'ERROR'})
+            </h4>
+            <p className="text-xs opacity-90">{run.errorMessage}</p>
+            {run.errorCode === 'CLEANUP_FAILED' && (
+              <p className="text-[11px] text-amber-300/80 font-mono mt-1">
+                Recommendation: Run "npm run clean:faults" locally to reset any lingering proxy toxics.
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Metrics Summary Strip */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
         <Card className="p-3 text-center">

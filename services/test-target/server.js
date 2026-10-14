@@ -94,16 +94,12 @@ export async function handleRequest(req, res) {
     }
 
     // ------------------------------------------------------------------------
-    // Route: GET /api/demo
+    // Route: GET /api/demo and GET /ok
     // Purpose: Deterministic endpoint for baseline & fault-injected comparisons
     // ------------------------------------------------------------------------
-    if (pathname === '/api/demo') {
+    if (pathname === '/api/demo' || pathname === '/ok' || pathname === '/api/ok') {
       const requestId = searchParams.get('requestId') || searchParams.get('id') || null;
 
-      // Note on determinism:
-      // The payload structure and message are completely deterministic.
-      // The timestamp is documented as nondeterministic and reflects server time
-      // for request tracing and verification.
       sendJson(res, 200, {
         status: 'ok',
         service: 'test-target',
@@ -120,10 +116,92 @@ export async function handleRequest(req, res) {
     }
 
     // ------------------------------------------------------------------------
-    // Route: GET /api/slow
+    // Route: GET /status/:code or GET /status?code=...
+    // Purpose: Returns a controlled HTTP status code for testing error handling
+    // ------------------------------------------------------------------------
+    if (
+      pathname.startsWith('/status/') ||
+      pathname.startsWith('/api/status/') ||
+      pathname === '/status' ||
+      pathname === '/api/status'
+    ) {
+      let codeStr = '';
+      if (pathname.startsWith('/status/')) {
+        codeStr = pathname.slice('/status/'.length);
+      } else if (pathname.startsWith('/api/status/')) {
+        codeStr = pathname.slice('/api/status/'.length);
+      } else {
+        codeStr = searchParams.get('code') || '';
+      }
+
+      if (!/^\d{3}$/.test(codeStr)) {
+        sendJson(res, 400, {
+          status: 'error',
+          error: 'Bad Request',
+          message: 'Invalid status code parameter. Must be a 3-digit integer between 200 and 599.',
+        }, isHead);
+        return;
+      }
+
+      const targetStatusCode = Number.parseInt(codeStr, 10);
+      if (targetStatusCode < 200 || targetStatusCode > 599) {
+        sendJson(res, 400, {
+          status: 'error',
+          error: 'Bad Request',
+          message: `Status code ${targetStatusCode} is out of allowable HTTP range (200-599).`,
+        }, isHead);
+        return;
+      }
+
+      sendJson(res, targetStatusCode, {
+        status: targetStatusCode < 400 ? 'ok' : 'error',
+        statusCode: targetStatusCode,
+        service: 'test-target',
+        message: `Controlled test response with HTTP status ${targetStatusCode}`,
+      }, isHead);
+      return;
+    }
+
+    // ------------------------------------------------------------------------
+    // Route: GET /large or GET /api/large
+    // Purpose: Returns bounded deterministic payload for testing bandwidth limits
+    // ------------------------------------------------------------------------
+    if (pathname === '/large' || pathname === '/api/large') {
+      const rawSize = searchParams.get('sizeKb');
+      let sizeKb = 64; // Default: 64 KB
+
+      if (rawSize !== null) {
+        if (!/^\d+$/.test(rawSize)) {
+          sendJson(res, 400, {
+            status: 'error',
+            error: 'Bad Request',
+            message: "Invalid 'sizeKb' parameter. Must be an integer between 1 and 1024.",
+          }, isHead);
+          return;
+        }
+        sizeKb = Math.max(1, Math.min(Number.parseInt(rawSize, 10), 1024)); // Cap at 1MB
+      }
+
+      const chunkSize = 1024;
+      const pattern = 'NetReplay-Deterministic-Throughput-Test-Payload-Chunk-Block-0123456789ABCDEF\n';
+      const chunk = pattern.repeat(Math.ceil(chunkSize / pattern.length)).slice(0, chunkSize);
+      const data = chunk.repeat(sizeKb);
+
+      sendJson(res, 200, {
+        status: 'ok',
+        service: 'test-target',
+        message: `Bounded payload of ${sizeKb} KB`,
+        sizeBytes: Buffer.byteLength(data, 'utf-8'),
+        data,
+      }, isHead);
+      return;
+    }
+
+    // ------------------------------------------------------------------------
+    // Route: GET /slow or GET /api/slow
     // Purpose: Simulates internal application processing delay (vs network delay)
     // ------------------------------------------------------------------------
-    if (pathname === '/api/slow') {
+    if (pathname === '/api/slow' || pathname === '/slow') {
       const rawDelay = searchParams.get('delay') ?? searchParams.get('ms');
       let delayMs = DEFAULT_SLOW_DELAY_MS;
 

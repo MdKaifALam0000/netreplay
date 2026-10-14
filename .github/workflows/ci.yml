@@ -109,6 +109,9 @@ jobs:
             sleep 1
           done
 
+      - name: Run Preflight Setup Diagnostic Check
+        run: npm run check:setup
+
       - name: Run API Tests
         run: npm run test:api
 
@@ -120,6 +123,9 @@ jobs:
 
       - name: Run Live Network Fault Smoke Test
         run: npm run test:smoke
+
+      - name: Run Complete End-to-End Validation Journey
+        run: npm run test:e2e
 
       - name: Run Emergency Fault Recovery Reset
         if: always()

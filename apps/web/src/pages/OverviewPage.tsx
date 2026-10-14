@@ -364,10 +364,10 @@ export const OverviewPage: React.FC = () => {
             )}
           </Card>
 
-          {/* Quick Architecture Summary */}
+          {/* Quick Architecture & Recovery Reference */}
           <Card className="p-4 bg-surface/50 border-dashed">
             <h4 className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-2">
-              Topology Reference
+              Topology & Recovery Reference
             </h4>
             <div className="space-y-1.5 text-xs text-zinc-400 font-mono">
               <div className="flex justify-between">
@@ -376,7 +376,7 @@ export const OverviewPage: React.FC = () => {
               </div>
               <div className="flex justify-between">
                 <span>Toxiproxy Proxy:</span>
-                <span className="text-zinc-200">:8666 (faulted)</span>
+                <span className="text-zinc-200">:8666 (traffic)</span>
               </div>
               <div className="flex justify-between">
                 <span>Toxiproxy API:</span>
@@ -386,6 +386,15 @@ export const OverviewPage: React.FC = () => {
                 <span>Fastify API:</span>
                 <span className="text-zinc-200">:3100 (REST)</span>
               </div>
+            </div>
+            <div className="mt-3 pt-3 border-t border-zinc-800 text-[11px] text-zinc-400">
+              <span className="text-zinc-300 font-medium block mb-1">Emergency Recovery:</span>
+              <code className="text-indigo-400 font-mono bg-zinc-900 px-1.5 py-0.5 rounded text-[10px]">
+                npm run clean:faults
+              </code>
+              <p className="mt-1 text-zinc-500 text-[10px]">
+                Resets active toxics if an experiment is abruptly interrupted.
+              </p>
             </div>
           </Card>
         </div>

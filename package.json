@@ -25,7 +25,8 @@
     "prisma:generate": "npm --prefix apps/api run prisma:generate",
     "prisma:migrate": "npm --prefix apps/api run prisma:migrate",
     "target:start": "npm --prefix services/test-target start",
-    "clean:faults": "node scripts/reset-faults.mjs"
+    "clean:faults": "node scripts/reset-faults.mjs",
+    "check:setup": "node scripts/check-setup.mjs"
   },
   "engines": {
     "node": ">=20.0.0"

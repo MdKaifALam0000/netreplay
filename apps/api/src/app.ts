@@ -34,10 +34,20 @@ export async function buildApp(options: FastifyServerOptions = {}): Promise<Fast
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);
 
-  // Register CORS
+  // Register CORS restricted to configured local frontend origins
   await app.register(cors, {
-    origin: true,
+    origin: (origin, cb) => {
+      // Allow requests with no origin (e.g. curl, test runners, server-to-server)
+      if (!origin) {
+        return cb(null, true);
+      }
+      if (config.corsOrigins.includes(origin)) {
+        return cb(null, true);
+      }
+      return cb(new Error(`Origin '${origin}' not allowed by CORS`), false);
+    },
     methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+    credentials: true,
   });
 
   // Register Swagger documentation

@@ -25,6 +25,7 @@ export interface AppConfig {
   testTargetProxyUrl: string;
   logLevel: string;
   maxConcurrentRuns: number;
+  corsOrigins: string[];
 }
 
 const defaultDbPath = path.resolve(__dirname, '..', 'prisma', 'dev.db');
@@ -40,4 +41,7 @@ export const config: AppConfig = {
   testTargetProxyUrl: process.env.TEST_TARGET_PROXY_URL || 'http://127.0.0.1:8666',
   logLevel: process.env.LOG_LEVEL || (process.env.NODE_ENV === 'test' ? 'silent' : 'info'),
   maxConcurrentRuns: 1, // Strict single-experiment concurrency per proxy
+  corsOrigins: process.env.CORS_ORIGINS
+    ? process.env.CORS_ORIGINS.split(',').map((s) => s.trim())
+    : ['http://localhost:5173', 'http://127.0.0.1:5173'],
 };

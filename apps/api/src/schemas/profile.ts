@@ -41,7 +41,7 @@ export const FaultSchema = z.discriminatedUnion('type', [
 
 export type Fault = z.infer<typeof FaultSchema>;
 
-export const TargetConfigSchema = z.object({
+export const TargetConfigDetailsSchema = z.object({
   type: z.literal('http').default('http'),
   path: z.string().startsWith('/').max(200).default('/api/demo'),
   method: z.enum(['GET', 'HEAD']).default('GET'),
@@ -49,7 +49,12 @@ export const TargetConfigSchema = z.object({
   message: 'Target path must be a relative local path (e.g., /api/demo) and cannot contain full URLs or schemes',
 });
 
-export type TargetConfig = z.infer<typeof TargetConfigSchema>;
+export const TargetConfigSchema = z.union([
+  z.literal('local-test-target').transform(() => ({ type: 'http' as const, path: '/api/demo', method: 'GET' as const })),
+  TargetConfigDetailsSchema,
+]);
+
+export type TargetConfig = z.infer<typeof TargetConfigDetailsSchema>;
 
 export const SuccessCriteriaSchema = z.object({
   maxMedianLatencyMs: z.number().min(0).optional(),
@@ -81,7 +86,7 @@ export const ProfileResponseSchema = z.object({
   name: z.string(),
   description: z.string().nullable().optional(),
   engine: z.string(),
-  target: TargetConfigSchema,
+  target: TargetConfigDetailsSchema,
   faults: z.array(FaultSchema),
   requestCount: z.number(),
   requestTimeoutMs: z.number(),

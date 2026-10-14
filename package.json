@@ -14,6 +14,7 @@
     "test:smoke": "node scripts/smoke-test.mjs",
     "test:smoke:setup": "docker compose up -d --build && node scripts/smoke-test.mjs",
     "test:api": "npm --prefix apps/api test",
+    "test:e2e": "node scripts/verify-api-e2e.mjs",
     "dev:api": "npm --prefix apps/api run dev",
     "build:api": "npm --prefix apps/api run build",
     "typecheck:api": "npm --prefix apps/api run typecheck",

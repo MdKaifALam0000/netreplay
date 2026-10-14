@@ -1,0 +1,77 @@
+// Prisma schema for NetReplay SQLite experiment storage
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Profile {
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  engine      String   @default("toxiproxy")
+  config      String   // Serialized JSON of validated target, faults, counts, criteria
+  tags        String?  // Serialized JSON array of tags
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  runs        Run[]
+
+  @@index([createdAt])
+}
+
+model Run {
+  id              String          @id @default(cuid())
+  profileId       String?
+  replayedFromId  String?
+  status          String          @default("queued") // queued, preparing, running, collecting, completed, failed, cancelled
+  configSnapshot  String          // Serialized JSON of complete configuration executed
+  startedAt       DateTime?
+  finishedAt      DateTime?
+  summary         String?         // Serialized JSON statistics (median, mean, counts, etc.)
+  errorCode       String?
+  errorMessage    String?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  profile         Profile?        @relation(fields: [profileId], references: [id], onDelete: SetNull)
+  requests        RequestResult[]
+  events          RunEvent[]
+
+  @@index([profileId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model RequestResult {
+  id            String   @id @default(cuid())
+  runId         String
+  requestIndex  Int
+  outcome       String   // success, failure, timeout
+  statusCode    Int?
+  latencyMs     Float
+  errorCategory String?
+  timestamp     DateTime @default(now())
+
+  run           Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId])
+  @@index([runId, requestIndex])
+}
+
+model RunEvent {
+  id        String   @id @default(cuid())
+  runId     String
+  eventType String   // state_change, fault_applied, fault_removed, batch_started, batch_completed, cancelled, error
+  timestamp DateTime @default(now())
+  details   String?  // Serialized JSON details
+
+  run       Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId])
+  @@index([runId, timestamp])
+}

@@ -8,11 +8,17 @@
     "up": "docker compose up -d --build",
     "down": "docker compose down",
     "logs": "docker compose logs -f",
-    "test": "node --test packages/toxiproxy/test/validation.test.js packages/toxiproxy/test/adapter.test.js",
+    "test": "npm run test:unit && npm run test:api",
     "test:unit": "node --test packages/toxiproxy/test/validation.test.js packages/toxiproxy/test/adapter.test.js",
     "test:integration": "node --test packages/toxiproxy/test/integration.test.js",
     "test:smoke": "node scripts/smoke-test.mjs",
     "test:smoke:setup": "docker compose up -d --build && node scripts/smoke-test.mjs",
+    "test:api": "npm --prefix apps/api test",
+    "dev:api": "npm --prefix apps/api run dev",
+    "build:api": "npm --prefix apps/api run build",
+    "typecheck:api": "npm --prefix apps/api run typecheck",
+    "prisma:generate": "npm --prefix apps/api run prisma:generate",
+    "prisma:migrate": "npm --prefix apps/api run prisma:migrate",
     "target:start": "npm --prefix services/test-target start"
   },
   "engines": {

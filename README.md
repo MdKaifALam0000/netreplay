@@ -1,306 +1,345 @@
-# NetReplay — Step 2: Reusable Toxiproxy Engine Adapter
+# NetReplay — Network Failure Reproduction Platform
 
 NetReplay is an open-source network failure reproduction platform designed to help engineers simulate, capture, and reliably replay complex distributed system network faults (latency, packet drops, bandwidth throttles, TCP connection resets, and timeouts).
 
-This repository contains **Step 2: Reusable Toxiproxy Engine Adapter**, building upon the Step 1 infrastructure with a typed, modular, and resilient JavaScript ES module adapter located in `packages/toxiproxy/`.
+This repository implements **Step 3: Fastify REST API and Experiment Storage**, building on the Step 1 Docker test target / Toxiproxy infrastructure and Step 2 reusable engine adapter.
 
 ---
 
 ## Table of Contents
 
 1. [Architecture & Topology](#architecture--topology)
-2. [What Step 2 Adds & Architecture Decisions](#what-step-2-adds--architecture-decisions)
-3. [Control API (:8474) vs. Traffic Proxy Listener (:8666)](#control-api-8474-vs-traffic-proxy-listener-8666)
-4. [Toxiproxy Adapter API & Code Examples](#toxiproxy-adapter-api--code-examples)
-5. [Supported Fault Types & Schemas](#supported-fault-types--schemas)
-6. [Prerequisites & Quickstart](#prerequisites--quickstart)
-7. [Running Tests (Unit, Integration, Smoke)](#running-tests-unit-integration-smoke)
-8. [Manual Inspection & Verification](#manual-inspection--verification)
-9. [Diagnosing Port Failures & Troubleshooting](#diagnosing-port-failures--troubleshooting)
-10. [Known Limitations (TCP Proxy vs. Linux tc-netem)](#known-limitations-tcp-proxy-vs-linux-tc-netem)
-11. [Shutdown and Cleanup](#shutdown-and-cleanup)
-12. [License & Third-Party Notes](#license--third-party-notes)
+2. [What Step 3 Adds](#what-step-3-adds)
+3. [REST API Contract (`/api/v1`)](#rest-api-contract-apiv1)
+4. [Database & Persistence (SQLite + Prisma)](#database--persistence-sqlite--prisma)
+5. [Experiment Runner Mechanics](#experiment-runner-mechanics)
+6. [Interactive OpenAPI / Swagger Documentation](#interactive-openapi--swagger-documentation)
+7. [Prerequisites & Environment Configuration](#prerequisites--environment-configuration)
+8. [Quickstart & PowerShell Commands](#quickstart--powershell-commands)
+9. [Running Automated Tests](#running-automated-tests)
+10. [Step 2 Toxiproxy Engine Adapter Overview](#step-2-toxiproxy-engine-adapter-overview)
+11. [Supported Fault Types & Schemas](#supported-fault-types--schemas)
+12. [Operational Safety & Known Limitations](#operational-safety--known-limitations)
+13. [Troubleshooting Guide](#troubleshooting-guide)
+14. [License](#license)
 
 ---
 
 ## Architecture & Topology
 
 ```
-+-------------------------------------------------------------------------+
-|                              HOST MACHINE                               |
-|                                                                         |
-|    [Node.js Runtime / Scripts / Tests / Fastify Service (Step 3)]       |
-|                                  |                                      |
-|    +-----------------------------v---------------------------------+    |
-|    |           packages/toxiproxy (ToxiproxyAdapter)               |    |
-|    |                                                               |    |
-|    |  * validation.js  (Strict schema & parameter bounds checks)   |    |
-|    |  * client.js      (Typed HTTP REST client with AbortSignal)   |    |
-|    |  * adapter.js     (ensureProxy, applyFault, withFault)        |    |
-|    |  * errors.js      (Actionable typed error hierarchy)          |    |
-|    +------------------+------------------------------+-------------+    |
-+-----------------------|------------------------------|------------------+
-                        |                              |
-      HTTP Control API  |          Proxied Traffic     | Direct Baseline
-      (:8474)           |          (:8666)             | (:3000)
-                        |                              |
-+-----------------------v------------------------------v------------------+
-| DOCKER BRIDGE NETWORK (`netreplay-network`)                             |
-|                                                                         |
-|  +-------------------------+            +----------------------------+  |
-|  |   netreplay-toxiproxy   |            |   netreplay-test-target    |  |
-|  |                         |  TCP Fwd   |                            |  |
-|  |  * Control API: :8474   |----------->|  * Port: :3000             |  |
-|  |  * Listener: :8666      |            |  * Healthcheck: /health    |  |
-|  |  * Toxics: latency, etc.|            |  * Endpoints: /api/demo    |  |
-|  +-------------------------+            |               /api/slow    |  |
-|                                         +----------------------------+  |
-+-------------------------------------------------------------------------+
++------------------------------------------------------------------------------------+
+|                                    HOST MACHINE                                    |
+|                                                                                    |
+|  +------------------------------------------------------------------------------+  |
+|  |                 Fastify REST API (`apps/api`) — Port :3100                   |  |
+|  |                                                                              |  |
+|  |  * Routes: Health, Engines, Profiles, Runs, Replay, Reports                  |  |
+|  |  * Schemas: Strict Zod validation with TypeProviderZod                       |  |
+|  |  * OpenAPI: Swagger UI live at http://127.0.0.1:3100/docs                    |  |
+|  |  * Storage: SQLite via Prisma ORM (`apps/api/prisma/dev.db`)                 |  |
+|  |  * Runner: Monotonic clock (`performance.now()`), 1 active run/proxy lock    |  |
+|  +-----------------------+-----------------------------+------------------------+  |
+|                          |                             |                           |
+|                          | Imports                     | Direct HTTP Calls         |
+|                          v                             |                           |
+|  +--------------------------------------------------+  |                           |
+|  |     packages/toxiproxy (ToxiproxyAdapter)        |  |                           |
+|  |  * Low-level client with NetReplay User-Agent    |  |                           |
+|  |  * withFault scoped cleanup in finally block     |  |                           |
+|  +-----------------------+--------------------------+  |                           |
++--------------------------|-----------------------------|---------------------------+
+                           |                             |
+         HTTP Control API  |             Proxied Traffic | Direct Baseline
+         (:8474)           |             (:8666)         | (:3000)
+                           |                             |
++--------------------------v-----------------------------v---------------------------+
+| DOCKER BRIDGE NETWORK (`netreplay-network`)                                        |
+|                                                                                    |
+|  +-----------------------------+               +--------------------------------+  |
+|  |     netreplay-toxiproxy     |               |     netreplay-test-target      |  |
+|  |                             |   TCP Fwd     |                                |  |
+|  |  * Control API: :8474       |-------------->|  * Port: :3000                 |  |
+|  |  * Traffic Listener: :8666  |               |  * Healthcheck: /health        |  |
+|  |  * Toxics: latency, timeout,|               |  * Endpoints: /api/demo        |  |
+|  |            bandwidth, reset |               |               /api/slow        |  |
+|  +-----------------------------+               +--------------------------------+  |
++------------------------------------------------------------------------------------+
 ```
 
 ---
 
-## What Step 2 Adds & Architecture Decisions
+## What Step 3 Adds
 
-1. **Modular Engine Adapter (`packages/toxiproxy/`)**:
-   - `client.js`: Low-level, typed HTTP client communicating with Shopify Toxiproxy v2 REST API using Node.js built-in `fetch` and `AbortController`.
-   - `adapter.js`: Domain orchestrator providing idempotent proxy management (`ensureProxy`), scoped fault lifecycles (`withFault`), and targeted fault cleanup (`clearFaults`).
-   - `validation.js`: Schema validation and parameter bounds checking enforcing safe, bounded fault values.
-   - `errors.js`: Actionable, typed error hierarchy (`ToxiproxyValidationError`, `ToxiproxyNotFoundError`, `ToxiproxyConflictError`, `ToxiproxyTimeoutError`, `ToxiproxyConnectionError`, `ToxiproxyCleanupError`).
-2. **Anti-CSRF User-Agent Handling**:
-   - Toxiproxy v2 automatically rejects requests whose `User-Agent` starts with `Mozilla/` (`403 Forbidden: User agent not allowed`). The adapter and client consistently inject a non-browser header (`NetReplay-EngineAdapter/1.0`).
-3. **Scoped Fault Isolation (`withFault`)**:
-   - Rather than globally resetting the engine or leaving stray toxics behind on failure, `adapter.withFault()` guarantees toxic cleanup in a `finally` block, coordinating both callback errors and cleanup errors without masking either.
-4. **Refactored Smoke Test**:
-   - `scripts/smoke-test.mjs` was refactored to use `ToxiproxyAdapter`, maintaining deterministic measurements while eliminating duplicated HTTP logic.
+1. **Versioned REST API (`/api/v1`) in `apps/api/`**:
+   - Built with Fastify v5 and strict TypeScript (`NodeNext` module resolution).
+   - Zod validation for all route params, queries, and request bodies with automatic OpenAPI schema generation.
+   - Centralized error handling providing RFC-compliant JSON errors without leaking internals or stack traces.
+2. **Local Persistence with SQLite & Prisma**:
+   - `Profile`, `Run`, `RequestResult`, and `RunEvent` data models.
+   - Strict foreign key constraints with safe referential integrity: profiles cannot be deleted if active runs reference them; historical runs preserve configuration snapshots independently of future profile edits or deletions.
+3. **In-Process Experiment Runner**:
+   - Asynchronous queueing (returns `202 Accepted` immediately upon creation).
+   - Lifecycle state machine: `queued` → `preparing` → `running` → `collecting` → `completed` (or `failed` / `cancelled`).
+   - Single-experiment concurrency limit per proxy to prevent cross-contamination.
+   - Microsecond timing resolution using monotonic clocks (`performance.now()`).
+   - Guaranteed fault removal in a `finally` block even if the run fails or is cancelled.
+4. **Replay Engine**:
+   - Replays use the original run's immutable `configSnapshot` rather than current profile state.
+   - Preserves historical experiment integrity across profile updates.
+5. **Interactive Swagger UI**:
+   - Hosted at `/docs` with schema models, operation summaries, and error formats.
+6. **Multi-Format Experiment Reporting**:
+   - Export run summaries, metrics, and request traces as JSON or formatted Markdown.
 
 ---
 
-## Control API (:8474) vs. Traffic Proxy Listener (:8666)
+## REST API Contract (`/api/v1`)
 
-Understanding the distinction between these two ports is critical when operating NetReplay:
-
-| Characteristic | Control API (`:8474`) | Traffic Proxy Listener (`:8666`) |
+### Health and Engines
+| Method | Endpoint | Description |
 | :--- | :--- | :--- |
-| **Protocol** | HTTP (JSON REST API) | Raw TCP Stream (forwards to `test-target:3000`) |
-| **Purpose** | Inspecting engine, configuring proxies, injecting toxics | Sending application requests to measure fault impact |
-| **Initial State** | Immediately open upon Toxiproxy container boot | **Closed** until `ensureProxy` creates `netreplay-demo` |
-| **User-Agent Requirement** | Rejects `Mozilla/*` (requires non-browser header) | Standard HTTP headers passed transparently |
-| **Client** | `ToxiproxyClient` / `ToxiproxyAdapter` / `curl` | Browser / Test runner / Application client |
+| `GET` | `/health` | Basic application liveness check (`{ status: "ok", timestamp }`). |
+| `GET` | `/api/v1/health` | Application readiness check, including database connectivity verification. |
+| `GET` | `/api/v1/engines` | List available network fault engines, configuration status, and health. |
+| `GET` | `/api/v1/engines/toxiproxy` | Inspect Toxiproxy engine status and reported daemon version. |
+
+### Experiment Profiles
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `GET` | `/api/v1/profiles` | List profiles with pagination (`page`, `pageSize`). |
+| `POST` | `/api/v1/profiles` | Create a profile with validated target, engine, and bounded faults. |
+| `GET` | `/api/v1/profiles/:id` | Retrieve a single profile by ID. |
+| `PATCH` | `/api/v1/profiles/:id` | Partially update a profile. |
+| `DELETE` | `/api/v1/profiles/:id` | Delete a profile (rejects with `409 Conflict` if an active run exists). |
+
+### Experiment Runs
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `POST` | `/api/v1/runs` | Schedule a new experiment run for a profile (`202 Accepted`). |
+| `GET` | `/api/v1/runs` | List runs with pagination and optional `status` filter. |
+| `GET` | `/api/v1/runs/:id` | Retrieve run status, timing, and summary statistics. |
+| `GET` | `/api/v1/runs/:id/events` | List chronological lifecycle events for a run. |
+| `GET` | `/api/v1/runs/:id/requests` | List individual request-level timing and outcome measurements. |
+| `POST` | `/api/v1/runs/:id/replay` | Create and schedule a new run from the source run's exact config snapshot. |
+| `POST` | `/api/v1/runs/:id/cancel` | Cancel an active run safely (stops future requests and cleans up faults). |
+
+### Reports
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `GET` | `/api/v1/runs/:id/report?format=json` | Export experiment summary, metrics, and requests in JSON. |
+| `GET` | `/api/v1/runs/:id/report?format=markdown` | Export formatted Markdown experiment report. |
 
 ---
 
-## Toxiproxy Adapter API & Code Examples
+## Database & Persistence (SQLite + Prisma)
 
-### Example 1: Basic Fault Injection and Manual Removal
+The SQLite database schema is defined in `apps/api/prisma/schema.prisma`:
 
-```javascript
-import { ToxiproxyAdapter } from './packages/toxiproxy/src/index.js';
-
-const adapter = new ToxiproxyAdapter({ baseUrl: 'http://127.0.0.1:8474' });
-
-// 1. Verify engine health
-const health = await adapter.checkHealth();
-console.log(`Connected to Toxiproxy v${health.version}`);
-
-// 2. Ensure proxy exists and routes traffic (idempotent)
-await adapter.ensureProxy({
-  name: 'netreplay-demo',
-  listen: '0.0.0.0:8666',
-  upstream: 'test-target:3000',
-  enabled: true,
-});
-
-// 3. Apply a 500ms downstream latency fault
-await adapter.applyFault('netreplay-demo', {
-  name: 'custom_latency',
-  type: 'latency',
-  latencyMs: 500,
-  jitterMs: 50,
-  stream: 'downstream',
-});
-
-// ... perform tests through http://127.0.0.1:8666 ...
-
-// 4. Remove the fault when finished
-await adapter.removeFault('netreplay-demo', 'custom_latency');
-```
-
-### Example 2: Scoped Execution with Cleanup Guarantee (`withFault`)
-
-`withFault` applies the fault, executes your asynchronous callback, and guarantees toxic removal in a `finally` block even if the callback throws an error:
-
-```javascript
-import { ToxiproxyAdapter } from './packages/toxiproxy/src/index.js';
-
-const adapter = new ToxiproxyAdapter({ baseUrl: 'http://127.0.0.1:8474' });
-
-await adapter.withFault(
-  'netreplay-demo',
-  {
-    type: 'latency',
-    latencyMs: 1000,
-    stream: 'downstream',
-  },
-  async () => {
-    // Traffic sent through http://127.0.0.1:8666 will now experience +1000ms delay
-    const start = performance.now();
-    const res = await fetch('http://127.0.0.1:8666/api/demo');
-    const elapsed = performance.now() - start;
-    console.log(`Observed response time under fault: ${elapsed.toFixed(1)}ms`);
-
-    // Even if an assertion throws here, the fault is GUARANTEED to be removed
-    if (!res.ok) {
-      throw new Error('Endpoint returned error status');
-    }
-  }
-);
-// Fault is cleanly removed at this point
-```
+- **`Profile`**: Defines reusable experiment specifications (name, description, engine, target, serialized config, tags).
+- **`Run`**: Represents an experiment execution. Stores status (`queued`, `preparing`, `running`, `collecting`, `completed`, `failed`, `cancelled`), immutable `configSnapshot`, start/finish times, error codes, and summary JSON.
+- **`RequestResult`**: Records every individual probe request (index, outcome, HTTP status, latency in ms, error category, timestamp).
+- **`RunEvent`**: Ordered audit trail of lifecycle events (`run_queued`, `run_started`, `fault_injected`, `run_completed`, etc.) with structured JSON details.
 
 ---
 
-## Supported Fault Types & Schemas
+## Experiment Runner Mechanics
 
-NetReplay maps internal fault declarations to Toxiproxy toxic definitions with strict validation:
-
-### 1. `latency`
-Adds transmission delay to packets.
-- `latencyMs` (*integer, 0 to 60,000*): Milliseconds of added delay.
-- `jitterMs` (*integer, 0 to 30,000, default: 0*): Milliseconds of randomized variance ($\pm \text{jitter}$).
-- `stream` (*string, "upstream" or "downstream", default: "downstream"*): Link direction to affect.
-- `toxicity` (*number, 0.0 to 1.0, default: 1.0*): Probability that packets are delayed.
-
-### 2. `timeout`
-Stalls all connection data and closes the TCP socket after the specified timeout.
-- `timeoutMs` (*integer, 0 to 60,000*): Delay in milliseconds before closing connection. If `0`, connection stalls indefinitely without closing until toxic is removed.
-- `stream` (*string, default: "downstream"*): Direction.
-- `toxicity` (*number, default: 1.0*): Probability.
-
-> [!NOTE]
-> **Timeout vs. Client Request Deadline**: Toxiproxy's timeout toxic simulates connection transport stalling and delayed socket closure. This is distinct from an HTTP client's `AbortSignal` timeout, which is enforced locally on the caller.
-
-### 3. `bandwidth`
-Throttles connection throughput.
-- `rateKbps` (*integer, 1 to 1,000,000*): Maximum rate in kilobytes per second.
-- `stream` (*string, default: "downstream"*): Direction.
-- `toxicity` (*number, default: 1.0*): Probability.
-
-### 4. `reset` / `reset_peer`
-Simulates sudden connection termination by issuing a TCP `RST` (connection reset by peer) without performing a standard TCP `FIN` handshake.
-- `stream` (*string, default: "downstream"*): Direction.
-- `toxicity` (*number, default: 1.0*): Probability.
+1. **Non-blocking Execution**:
+   - `POST /api/v1/runs` immediately inserts a `Run` record with status `queued` and fires the asynchronous runner, returning `202 Accepted` with `{ runId, status: "queued" }`.
+2. **Concurrency Safety**:
+   - The runner acquires an in-memory lock per proxy name (e.g. `netreplay-demo`). If an experiment is already executing against that proxy, concurrent requests are safely rejected or queued to prevent toxic collisions.
+3. **Monotonic Timing**:
+   - Probe request latencies are measured using `performance.now()` before and after HTTP calls to eliminate clock drift or NTP adjustments.
+4. **Resilient Cleanup**:
+   - Even if target requests timeout, abort, or throw unexpected socket exceptions, fault removal (`adapter.removeFault`) executes within a `finally` block, ensuring no orphan toxics persist on the proxy.
+5. **Snapshot Isolation for Replays**:
+   - Calling `POST /api/v1/runs/:id/replay` reads the historical `configSnapshot` from the source run rather than referencing the live profile. If the profile was updated or deleted after the original run, the replay remains unaffected.
 
 ---
 
-## Prerequisites & Quickstart
+## Interactive OpenAPI / Swagger Documentation
+
+The API includes built-in Swagger/OpenAPI documentation:
+- **Swagger UI**: [http://127.0.0.1:3100/docs](http://127.0.0.1:3100/docs)
+- **OpenAPI JSON**: [http://127.0.0.1:3100/docs/json](http://127.0.0.1:3100/docs/json)
+
+All endpoints, query parameters, request payloads, response codes, and validation error models are documented and testable directly in the browser.
+
+---
+
+## Prerequisites & Environment Configuration
 
 ### Prerequisites
-- Node.js LTS (v20+ or v22+)
-- Docker Desktop for Windows (running)
+- **Node.js LTS** (v20+ or v22+)
+- **Docker Desktop for Windows** (running)
 
-### Start Docker Containers
+### Environment Files
+Copy `.env.example` to `.env` (or configure the environment directly):
+```env
+# Application Host & Port
+API_PORT=3100
+HOST=127.0.0.1
+
+# Database Configuration (SQLite)
+DATABASE_URL="file:./dev.db"
+
+# Toxiproxy Engine
+TOXIPROXY_CONTROL_URL="http://127.0.0.1:8474"
+TOXIPROXY_PROXY_NAME="netreplay-demo"
+
+# Network Targets
+TEST_TARGET_DIRECT_URL="http://127.0.0.1:3000"
+TEST_TARGET_PROXIED_URL="http://127.0.0.1:8666"
+```
+
+---
+
+## Quickstart & PowerShell Commands
+
+### 1. Start Docker Infrastructure
 ```powershell
 npm run up
 ```
-*(Runs `docker compose up -d --build`)*
 
-Verify services are running:
+### 2. Install Dependencies & Initialize Database
 ```powershell
-docker compose ps
+# Install root & workspace dependencies
+npm install
+
+# Generate Prisma Client
+npm run prisma:generate
+
+# Run SQLite migrations
+npm run prisma:migrate
+```
+
+### 3. Start the API Development Server
+```powershell
+npm run dev:api
+```
+The server will start at:
+- **Base URL**: `http://127.0.0.1:3100`
+- **Swagger Docs**: `http://127.0.0.1:3100/docs`
+- **Health Check**: `http://127.0.0.1:3100/health`
+
+### 4. Build for Production & Start Compiled Server
+```powershell
+npm run build:api
+npm run start:api
 ```
 
 ---
 
-## Running Tests (Unit, Integration, Smoke)
+## Running Automated Tests
 
-### 1. Unit Tests (Isolated, No Docker Required)
-Runs 37 offline unit tests with mock fetch dispatchers testing URL validation, schema checking, bounds enforcement, error mapping, and `withFault` cleanup:
+NetReplay includes isolated unit tests, API integration tests, and live network fault smoke tests:
+
+### 1. API Integration & Route Tests (Vitest)
+Executes 25 comprehensive tests against an isolated in-memory/temporary SQLite database verifying health, engine checks, profile CRUD, validation rules, run scheduling, snapshot replays, cancellations, concurrency limits, and markdown/JSON reports:
+```powershell
+npm run test:api
+```
+
+### 2. Type Checking
+Verifies TypeScript compilation across the API workspace under strict compiler options:
+```powershell
+npm run typecheck:api
+```
+
+### 3. Step 2 Toxiproxy Unit Tests (Isolated, No Docker)
+Runs 37 unit tests for the reusable Toxiproxy adapter:
 ```powershell
 npm run test:unit
 ```
 
-### 2. Live Integration Tests (Requires Running Docker)
-Runs live integration tests against the active Toxiproxy engine on `127.0.0.1:8474`:
+### 4. Live Toxiproxy Integration Tests
+Tests adapter operations directly against the running Toxiproxy Docker container:
 ```powershell
 npm run test:integration
 ```
 
-### 3. Smoke Test (End-to-End Fault Verification)
-Runs the end-to-end smoke test measuring direct baseline, clean proxy baseline, and 500ms injected latency:
+### 5. Network Smoke Test (Step 1 & 2 Verification)
+Runs the baseline vs. 500ms downstream latency fault smoke test:
 ```powershell
 npm run test:smoke
 ```
 
 ---
 
-## Manual Inspection & Verification
+## Step 2 Toxiproxy Engine Adapter Overview
 
-### PowerShell Session Setup
-To avoid typing `-UserAgent` on every manual request, configure PowerShell's default parameter values:
+The Fastify API interacts with Toxiproxy via `packages/toxiproxy/`:
+- `client.js`: HTTP client communicating with Shopify Toxiproxy v2 with custom User-Agent headers.
+- `adapter.js`: Manages proxy initialization (`ensureProxy`), scoped fault lifecycles (`withFault`), and toxic removal (`clearFaults`).
+- `validation.js`: Strict validation ensuring bounded numeric ranges for all fault parameters.
+- `errors.js`: Actionable error classes (`ToxiproxyValidationError`, `ToxiproxyNotFoundError`, etc.).
+
+---
+
+## Supported Fault Types & Schemas
+
+NetReplay maps profile fault definitions into Toxiproxy toxic configurations:
+
+1. **`latency`**:
+   - `latencyMs` (*integer, 0 to 60,000*): Downstream or upstream delay in milliseconds.
+   - `jitterMs` (*integer, 0 to 30,000, default: 0*): Randomized jitter delay ($\pm \text{jitter}$).
+   - `stream` (*"upstream" | "downstream", default: "downstream"*).
+   - `toxicity` (*number, 0.0 to 1.0, default: 1.0*): Probability of packet injection.
+2. **`timeout`**:
+   - `timeoutMs` (*integer, 0 to 60,000*): Socket stall duration before closure. `0` stalls connection indefinitely.
+   - `stream` (*"upstream" | "downstream"*).
+   - `toxicity` (*0.0 to 1.0*).
+3. **`bandwidth`**:
+   - `rateKbps` (*integer, 1 to 1,000,000*): Maximum throughput rate in KB/s.
+   - `stream` (*"upstream" | "downstream"*).
+   - `toxicity` (*0.0 to 1.0*).
+4. **`reset` / `reset_peer`**:
+   - Simulates immediate TCP `RST` termination without standard TCP `FIN` handshake.
+   - `stream` (*"upstream" | "downstream"*).
+   - `toxicity` (*0.0 to 1.0*).
+
+---
+
+## Operational Safety & Known Limitations
+
+1. **Target URL Whitelisting**:
+   - For security, profiles only permit configured local test targets (`local-test-target` -> `http://127.0.0.1:8666`). Arbitrary outbound URLs or user-supplied destinations are strictly rejected.
+2. **In-Process Runner Queue**:
+   - The Step 3 experiment runner runs in-process. If the Node.js API process crashes or restarts, active or queued in-flight experiments will transition to terminal states upon startup. (Production distributed deployments in future steps will introduce persistent job workers).
+3. **Replay Determinism Limits**:
+   - A replay guarantees identical configuration snapshot reuse, identical fault parameters, and probe counts. However, real network dynamics (TCP window resizing, OS scheduling jitter, random packet loss) mean network experiments have natural physical variance.
+4. **Authentication & Authorization**:
+   - Step 3 is designed for local development and private test environments. Authentication, API keys, and RBAC must be added before exposing the service to public or untrusted networks.
+5. **Control API Isolation**:
+   - The Toxiproxy control API (`:8474`) remains bound to localhost and internal Docker networks, never exposed publicly.
+
+---
+
+## Troubleshooting Guide
+
+### Port 3100 Already in Use
+Check which process is listening on port 3100:
 ```powershell
-$PSDefaultParameterValues['Invoke-RestMethod:UserAgent'] = 'NetReplay/1.0'
+Get-NetTCPConnection -LocalPort 3100 -ErrorAction SilentlyContinue | Select-Object OwningProcess
+```
+Stop the conflicting process or change `API_PORT` in `.env`.
+
+### Database Schema Out of Sync
+Re-run Prisma migrations:
+```powershell
+npm run prisma:migrate
 ```
 
-### Check Version & Configured Proxies
+### Stale Toxics on Proxy
+If an external process crashed while a toxic was active:
 ```powershell
-# Version check
-Invoke-RestMethod -Uri "http://127.0.0.1:8474/version"
-
-# Inspect active proxies
-Invoke-RestMethod -Uri "http://127.0.0.1:8474/proxies" | ConvertTo-Json -Depth 5
-```
-
-### Send Request Through Proxy
-```powershell
-Invoke-RestMethod -Uri "http://127.0.0.1:8666/api/demo?requestId=test-01"
+curl.exe -X POST -H "User-Agent: NetReplay/1.0" http://127.0.0.1:8474/reset
 ```
 
 ---
 
-## Diagnosing Port Failures & Troubleshooting
+## License
 
-### Problem 1: `The connection was closed unexpectedly` on Port 8666
-- **Diagnosis**: Port 8666 is the proxy traffic port. When Toxiproxy first boots, it has an empty proxy list. Nothing is bound to container port 8666 until `ensureProxy` creates `netreplay-demo`.
-- **Resolution**: Run `npm run test:smoke` or call `adapter.ensureProxy(...)` once to register the route.
-
-### Problem 2: `Invoke-RestMethod : User agent not allowed` on Port 8474
-- **Diagnosis**: Toxiproxy includes anti-CSRF protection that blocks user-agents starting with `Mozilla/`. Windows PowerShell 5.1 sends `Mozilla/5.0...` by default.
-- **Resolution**: Run `$PSDefaultParameterValues['Invoke-RestMethod:UserAgent'] = 'NetReplay/1.0'` or use `curl.exe`.
-
-### Problem 3: Stray Toxic Left Behind After Interrupted Process
-- **Diagnosis**: An experiment was forcefully killed (`Ctrl + C`) before cleanup completed.
-- **Resolution**: Clear toxics on the proxy without resetting other proxies:
-  ```powershell
-  # Using curl:
-  curl.exe -X DELETE -H "User-Agent: NetReplay/1.0" http://127.0.0.1:8474/proxies/netreplay-demo/toxics/latency_downstream
-  
-  # Or perform a complete engine reset:
-  curl.exe -X POST -H "User-Agent: NetReplay/1.0" http://127.0.0.1:8474/reset
-  ```
-
----
-
-## Known Limitations (TCP Proxy vs. Linux tc-netem)
-
-NetReplay Step 2 uses Toxiproxy, which operates as an **application-layer TCP proxy**:
-1. **L7/L4 Stream Manipulation**: Toxiproxy buffers and delays application byte streams over established TCP connections.
-2. **Not Kernel Packet Emulation**: It does not modify kernel routing tables or execute Linux `tc` (Traffic Control) `netem` queueing disciplines. Low-level ICMP drops, MTU fragmentation, and out-of-order IP packet reordering at the kernel network interface level require Linux privileges (`CAP_NET_ADMIN`) and are not simulated by Toxiproxy.
-3. **Connection Drops vs. Silent Packet Blackholes**: A Toxiproxy `reset` sends an immediate TCP `RST` segment. Simulating a silent network partition (where packets are silently dropped without RST or FIN) can be achieved using the `timeout` toxic with `timeout: 0`.
-
----
-
-## Shutdown and Cleanup
-
-To tear down all containers and networks:
-```powershell
-npm run down
-```
-
----
-
-## License & Third-Party Notes
-
-- **NetReplay**: Open-source under the MIT License.
-- **Shopify Toxiproxy**: Official open-source project by Shopify under the MIT License ([https://github.com/Shopify/toxiproxy](https://github.com/Shopify/toxiproxy)). Container image pinned: `ghcr.io/shopify/toxiproxy:2.12.0`.
-- **Node.js**: Distributed under the Node.js open-source license ([https://nodejs.org](https://nodejs.org)).
+NetReplay is open-source under the MIT License.
+Shopify Toxiproxy is licensed under the MIT License ([Shopify/toxiproxy](https://github.com/Shopify/toxiproxy)).

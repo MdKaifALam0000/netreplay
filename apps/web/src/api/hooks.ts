@@ -10,6 +10,7 @@ import type {
   CreateProfileInput,
   UpdateProfileInput,
   RunStatus,
+  StartMinimizationInput,
 } from '../types/api';
 
 export const isTerminalStatus = (status: RunStatus | string): boolean => {
@@ -170,3 +171,57 @@ export const useCancelRun = () => {
     },
   });
 };
+
+// ============================================================================
+// Automatic Failure Minimization Hooks
+// ============================================================================
+
+export const isTerminalMinimizationStatus = (status?: string): boolean =>
+  status === 'completed' ||
+  status === 'failed' ||
+  status === 'cancelled' ||
+  status === 'budget_exhausted' ||
+  status === 'baseline_not_reproducible';
+
+export const useMinimization = (id?: string) =>
+  useQuery({
+    queryKey: ['minimization', id],
+    queryFn: () => (id ? apiClient.getMinimization(id) : null),
+    enabled: Boolean(id),
+    refetchInterval: (query) => {
+      const min = query.state.data;
+      if (!min) return false;
+      return !isTerminalMinimizationStatus(min.status) ? 1000 : false;
+    },
+  });
+
+export const useMinimizationAttempts = (id?: string, isMinimizationActive = false) =>
+  useQuery({
+    queryKey: ['minimization-attempts', id],
+    queryFn: () => (id ? apiClient.getMinimizationAttempts(id) : { items: [], total: 0 }),
+    enabled: Boolean(id),
+    refetchInterval: isMinimizationActive ? 1000 : false,
+  });
+
+export const useStartMinimization = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ runId, input }: { runId: string; input: StartMinimizationInput }) =>
+      apiClient.startMinimization(runId, input),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['minimization', data.id] });
+    },
+  });
+};
+
+export const useCancelMinimization = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => apiClient.cancelMinimization(id),
+    onSuccess: (_, id) => {
+      queryClient.invalidateQueries({ queryKey: ['minimization', id] });
+      queryClient.invalidateQueries({ queryKey: ['minimization-attempts', id] });
+    },
+  });
+};
+

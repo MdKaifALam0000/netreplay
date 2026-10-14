@@ -19,6 +19,9 @@ import type {
   RunEvent,
   JsonReport,
   ApiErrorResponse,
+  Minimization,
+  StartMinimizationInput,
+  MinimizationAttemptsResponse,
 } from '../types/api';
 
 export class ApiClientError extends Error {
@@ -193,4 +196,22 @@ export const apiClient = {
 
   getMarkdownReport: (id: string) =>
     request<string>(`/api/v1/runs/${id}/report?format=markdown`),
+
+  // Minimizations
+  startMinimization: (runId: string, input: StartMinimizationInput) =>
+    request<Minimization>(`/api/v1/runs/${runId}/minimize`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+
+  getMinimization: (id: string) =>
+    request<Minimization>(`/api/v1/minimizations/${id}`),
+
+  getMinimizationAttempts: (id: string) =>
+    request<MinimizationAttemptsResponse>(`/api/v1/minimizations/${id}/attempts`),
+
+  cancelMinimization: (id: string) =>
+    request<Minimization>(`/api/v1/minimizations/${id}/cancel`, {
+      method: 'POST',
+    }),
 };

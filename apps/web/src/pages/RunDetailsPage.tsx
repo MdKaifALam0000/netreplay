@@ -10,6 +10,7 @@ import {
   AlertTriangle,
   FileText,
   FileCode,
+  Sparkles,
 } from 'lucide-react';
 import {
   useRun,
@@ -17,6 +18,7 @@ import {
   useRunEvents,
   useReplayRun,
   useCancelRun,
+  useStartMinimization,
   isTerminalStatus,
 } from '../api/hooks';
 import { Card } from '../components/ui/Card';
@@ -24,9 +26,11 @@ import { Button } from '../components/ui/Button';
 import { StatusBadge } from '../components/ui/StatusBadge';
 import { Skeleton } from '../components/ui/Skeleton';
 import { Dialog } from '../components/ui/Dialog';
+import { Input } from '../components/ui/Input';
 import { LatencyTimelineChart } from '../components/charts/LatencyTimelineChart';
 import { LatencyDistributionChart } from '../components/charts/LatencyDistributionChart';
 import { useToast } from '../components/ui/Toast';
+import type { FailurePredicate, FailurePredicateType } from '../types/api';
 
 export const RunDetailsPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -43,6 +47,18 @@ export const RunDetailsPage: React.FC = () => {
 
   const replayRun = useReplayRun();
   const cancelRun = useCancelRun();
+  const startMinimization = useStartMinimization();
+
+  const [isMinimizeOpen, setIsMinimizeOpen] = useState(false);
+  const [predicateType, setPredicateType] = useState<FailurePredicateType>('deadline_exceeded');
+  const [deadlineMs, setDeadlineMs] = useState(500);
+  const [targetStatusCode, setTargetStatusCode] = useState(500);
+  const [errorCategory, setErrorCategory] = useState('');
+  const [maxAttempts, setMaxAttempts] = useState(50);
+  const [deadlineSeconds, setDeadlineSeconds] = useState(300);
+  const [minReproductionRate, setMinReproductionRate] = useState(1.0);
+  const [trialsPerCandidate, setTrialsPerCandidate] = useState(1);
+  const [finalTrials, setFinalTrials] = useState(3);
 
   if (isRunLoading) {
     return (
@@ -135,6 +151,82 @@ export const RunDetailsPage: React.FC = () => {
     }
   };
 
+  const handleOpenMinimize = () => {
+    if (summary?.medianLatencyMs && summary.medianLatencyMs > 200) {
+      setPredicateType('deadline_exceeded');
+      setDeadlineMs(Math.round(summary.medianLatencyMs));
+    } else if (requests.some((r) => r.statusCode && r.statusCode >= 500)) {
+      setPredicateType('status_5xx');
+      const errStatus = requests.find((r) => r.statusCode && r.statusCode >= 500)?.statusCode;
+      setTargetStatusCode(errStatus || 500);
+    } else if (requests.some((r) => r.errorCategory && r.errorCategory.includes('RESET'))) {
+      setPredicateType('connection_reset');
+    } else if (summary?.timeoutCount && summary.timeoutCount > 0) {
+      setPredicateType('response_missing');
+    }
+    setIsMinimizeOpen(true);
+  };
+
+  const handleStartMinimization = async () => {
+    try {
+      let predicate: FailurePredicate;
+      switch (predicateType) {
+        case 'deadline_exceeded':
+          predicate = { type: 'deadline_exceeded', deadlineMs };
+          break;
+        case 'status_5xx':
+          predicate = {
+            type: 'status_5xx',
+            statusCode: targetStatusCode >= 500 ? targetStatusCode : undefined,
+          };
+          break;
+        case 'connection_reset':
+          predicate = { type: 'connection_reset' };
+          break;
+        case 'network_error':
+          predicate = {
+            type: 'network_error',
+            errorCategory: errorCategory.trim() || undefined,
+          };
+          break;
+        case 'response_missing':
+          predicate = { type: 'response_missing' };
+          break;
+        case 'status_code':
+          predicate = { type: 'status_code', statusCode: targetStatusCode };
+          break;
+      }
+
+      const minJob = await startMinimization.mutateAsync({
+        runId: run.id,
+        input: {
+          predicate,
+          minReproductionRate,
+          maxAttempts,
+          deadlineSeconds,
+          trialsPerCandidate,
+          finalTrials,
+          strategy: 'staged_delta_debugging',
+        },
+      });
+
+      toast({
+        title: 'Minimization Started',
+        message: 'Delta debugging search initialized',
+        type: 'success',
+      });
+
+      setIsMinimizeOpen(false);
+      navigate(`/minimizations/${minJob.id}`);
+    } catch (err: any) {
+      toast({
+        title: 'Minimization Failed',
+        message: err.message,
+        type: 'error',
+      });
+    }
+  };
+
   const calculateDuration = (): string => {
     if (!run.startedAt) return '—';
     const start = new Date(run.startedAt).getTime();
@@ -176,6 +268,18 @@ export const RunDetailsPage: React.FC = () => {
               onClick={() => setIsCancelOpen(true)}
             >
               Cancel Run
+            </Button>
+          )}
+
+          {/* Minimize Failure Button */}
+          {!isActive && (
+            <Button
+              variant="primary"
+              size="sm"
+              icon={<Sparkles className="w-4 h-4" />}
+              onClick={handleOpenMinimize}
+            >
+              Minimize Failure
             </Button>
           )}
 
@@ -440,6 +544,141 @@ export const RunDetailsPage: React.FC = () => {
         <p className="text-xs text-zinc-300 leading-relaxed">
           Cancelling will abort future requests and guarantee immediate removal of injected toxics from the Toxiproxy proxy. Results collected so far will be saved.
         </p>
+      </Dialog>
+
+      {/* Minimize Failure Configuration Dialog */}
+      <Dialog
+        isOpen={isMinimizeOpen}
+        onClose={() => setIsMinimizeOpen(false)}
+        title="Configure Automatic Failure Minimization"
+        description="Search for the smallest network fault configuration that still reproduces this application failure."
+        confirmLabel="Start Minimization"
+        confirmVariant="primary"
+        onConfirm={handleStartMinimization}
+        isConfirmLoading={startMinimization.isPending}
+        maxWidth="lg"
+      >
+        <div className="space-y-4 text-xs text-zinc-300">
+          <div>
+            <label className="block text-xs font-semibold text-zinc-200 mb-1">
+              Target Failure Predicate
+            </label>
+            <select
+              value={predicateType}
+              onChange={(e) => setPredicateType(e.target.value as FailurePredicateType)}
+              className="w-full bg-surface px-3 py-2 text-sm text-zinc-100 rounded-lg border border-surface-border focus:border-indigo-500 focus:outline-none"
+            >
+              <option value="deadline_exceeded">Deadline Exceeded (Latency / Timeout)</option>
+              <option value="status_5xx">HTTP Status 5xx (Server Error)</option>
+              <option value="connection_reset">Connection Reset (TCP Reset / Socket Close)</option>
+              <option value="network_error">Network Error (Specific Error Category)</option>
+              <option value="response_missing">Response Missing (Timeout or Dropped)</option>
+              <option value="status_code">Exact HTTP Status Code Assertion</option>
+            </select>
+          </div>
+
+          {predicateType === 'deadline_exceeded' && (
+            <Input
+              label="Latency Deadline Threshold (ms)"
+              type="number"
+              min={1}
+              max={60000}
+              value={deadlineMs}
+              onChange={(e) => setDeadlineMs(Number(e.target.value))}
+              helperText="The minimization engine will search for the lowest latency that still exceeds this threshold."
+            />
+          )}
+
+          {(predicateType === 'status_5xx' || predicateType === 'status_code') && (
+            <Input
+              label="Expected HTTP Status Code"
+              type="number"
+              min={100}
+              max={599}
+              value={targetStatusCode}
+              onChange={(e) => setTargetStatusCode(Number(e.target.value))}
+              helperText={
+                predicateType === 'status_5xx'
+                  ? 'Optionally specify exact 5xx status (e.g. 500, 502, 503, 504).'
+                  : 'Specify exact status code that signals reproduction.'
+              }
+            />
+          )}
+
+          {predicateType === 'network_error' && (
+            <Input
+              label="Network Error Category"
+              type="text"
+              placeholder="e.g. ECONNRESET, ETIMEDOUT, UND_ERR_SOCKET"
+              value={errorCategory}
+              onChange={(e) => setErrorCategory(e.target.value)}
+              helperText="Optional specific network error code to match."
+            />
+          )}
+
+          <div className="border-t border-surface-border pt-3">
+            <h4 className="text-xs font-semibold text-zinc-200 mb-2">Search Limits & Verification Policy</h4>
+            <div className="grid grid-cols-2 gap-3">
+              <Input
+                label="Attempt Budget (Max Evaluations)"
+                type="number"
+                min={5}
+                max={200}
+                value={maxAttempts}
+                onChange={(e) => setMaxAttempts(Number(e.target.value))}
+                helperText="Search stops if this budget is exhausted."
+              />
+
+              <Input
+                label="Wall-Clock Deadline (Seconds)"
+                type="number"
+                min={10}
+                max={900}
+                value={deadlineSeconds}
+                onChange={(e) => setDeadlineSeconds(Number(e.target.value))}
+                helperText="Maximum allowed search duration."
+              />
+
+              <Input
+                label="Exploration Trials per Candidate"
+                type="number"
+                min={1}
+                max={10}
+                value={trialsPerCandidate}
+                onChange={(e) => setTrialsPerCandidate(Number(e.target.value))}
+                helperText="Probes run during delta-debugging."
+              />
+
+              <Input
+                label="Final Verification Trials"
+                type="number"
+                min={1}
+                max={20}
+                value={finalTrials}
+                onChange={(e) => setFinalTrials(Number(e.target.value))}
+                helperText="Trials for final candidate validation."
+              />
+            </div>
+
+            <div className="mt-3">
+              <label className="block text-xs font-medium text-zinc-300 mb-1">
+                Reproduction Rate Threshold: {Math.round(minReproductionRate * 100)}%
+              </label>
+              <input
+                type="range"
+                min={0.1}
+                max={1.0}
+                step={0.05}
+                value={minReproductionRate}
+                onChange={(e) => setMinReproductionRate(Number(e.target.value))}
+                className="w-full accent-indigo-500 cursor-pointer"
+              />
+              <span className="text-[11px] text-zinc-500 block mt-0.5">
+                For nondeterministic failures, require at least this fraction of trials to reproduce.
+              </span>
+            </div>
+          </div>
+        </div>
       </Dialog>
     </div>
   );

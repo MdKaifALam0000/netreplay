@@ -231,3 +231,130 @@ export interface ApiErrorResponse {
   message: string;
   details?: any;
 }
+
+// ============================================================================
+// Automatic Failure Minimization Types
+// ============================================================================
+
+export type FailurePredicateType =
+  | 'status_5xx'
+  | 'deadline_exceeded'
+  | 'connection_reset'
+  | 'network_error'
+  | 'response_missing'
+  | 'status_code';
+
+export interface Status5xxPredicate {
+  type: 'status_5xx';
+  statusCode?: number;
+}
+
+export interface DeadlineExceededPredicate {
+  type: 'deadline_exceeded';
+  deadlineMs: number;
+}
+
+export interface ConnectionResetPredicate {
+  type: 'connection_reset';
+}
+
+export interface NetworkErrorPredicate {
+  type: 'network_error';
+  errorCategory?: string;
+}
+
+export interface ResponseMissingPredicate {
+  type: 'response_missing';
+}
+
+export interface StatusCodePredicate {
+  type: 'status_code';
+  statusCode: number;
+}
+
+export type FailurePredicate =
+  | Status5xxPredicate
+  | DeadlineExceededPredicate
+  | ConnectionResetPredicate
+  | NetworkErrorPredicate
+  | ResponseMissingPredicate
+  | StatusCodePredicate;
+
+export type MinimizationStatus =
+  | 'queued'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'budget_exhausted'
+  | 'baseline_not_reproducible';
+
+export interface StartMinimizationInput {
+  predicate: FailurePredicate;
+  minReproductionRate?: number;
+  strategy?: 'staged_delta_debugging';
+  maxAttempts?: number;
+  deadlineSeconds?: number;
+  trialsPerCandidate?: number;
+  finalTrials?: number;
+}
+
+export interface MinimizationAttempt {
+  id: string;
+  minimizationId: string;
+  attemptNumber: number;
+  stage: string;
+  changeDesc: string;
+  candidateConfig: Fault[];
+  triggered: boolean;
+  trialCount: number;
+  failedTrials: number;
+  reproductionRate: number;
+  durationMs: number;
+  outcome: string;
+  reason?: string | null;
+  details?: Record<string, any> | null;
+  timestamp: string;
+}
+
+export interface ConfigDifference {
+  removedFaults: Fault[];
+  modifiedFaults: Array<{
+    faultType: string;
+    original: Record<string, any>;
+    minimized: Record<string, any>;
+    reductionSummary: string;
+  }>;
+  retainedFaults: Fault[];
+}
+
+export interface Minimization {
+  id: string;
+  sourceRunId: string;
+  status: MinimizationStatus;
+  originalConfigSnapshot: Record<string, any>;
+  minimizedConfig?: Fault[] | null;
+  predicate: FailurePredicate;
+  minReproductionRate: number;
+  strategy: string;
+  maxAttempts: number;
+  attemptsUsed: number;
+  trialsPerCandidate: number;
+  finalTrials: number;
+  finalObservedRate?: number | null;
+  cleanupStatus: string;
+  differences?: ConfigDifference | null;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  durationMs?: number | null;
+  errorCode?: string | null;
+  errorMessage?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MinimizationAttemptsResponse {
+  items: MinimizationAttempt[];
+  total: number;
+}
+

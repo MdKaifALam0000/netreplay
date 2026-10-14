@@ -92,4 +92,55 @@ describe('API Client Suite', () => {
       expect(err.statusCode).toBe(0);
     }
   });
+
+  it('handles startMinimization, getMinimization, getMinimizationAttempts, and cancelMinimization', async () => {
+    // 1. startMinimization
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 202,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ id: 'min-1', status: 'queued', sourceRunId: 'run-1' }),
+    } as any);
+
+    const min = await apiClient.startMinimization('run-1', {
+      predicate: { type: 'deadline_exceeded', deadlineMs: 500 },
+    });
+    expect(min.id).toBe('min-1');
+    expect(min.status).toBe('queued');
+
+    // 2. getMinimization
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ id: 'min-1', status: 'completed', attemptsUsed: 4 }),
+    } as any);
+
+    const minDetails = await apiClient.getMinimization('min-1');
+    expect(minDetails.id).toBe('min-1');
+    expect(minDetails.status).toBe('completed');
+
+    // 3. getMinimizationAttempts
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ items: [{ id: 'att-1', attemptNumber: 1, outcome: 'kept' }], total: 1 }),
+    } as any);
+
+    const attempts = await apiClient.getMinimizationAttempts('min-1');
+    expect(attempts.items.length).toBe(1);
+    expect(attempts.items[0].attemptNumber).toBe(1);
+
+    // 4. cancelMinimization
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ id: 'min-1', status: 'cancelled' }),
+    } as any);
+
+    const cancelled = await apiClient.cancelMinimization('min-1');
+    expect(cancelled.status).toBe('cancelled');
+  });
 });

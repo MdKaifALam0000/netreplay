@@ -11,6 +11,8 @@ import {
 } from '../schemas/run.js';
 import { NotFoundError, ConflictError, BadRequestError } from '../errors/api-error.js';
 
+import { minimizerEngine } from './minimizer.js';
+
 function formatRun(record: any): RunResponse {
   const parsedSnapshot = JSON.parse(record.configSnapshot);
   const parsedSummary = record.summary ? JSON.parse(record.summary) : null;
@@ -33,10 +35,10 @@ function formatRun(record: any): RunResponse {
 
 export class RunService {
   async start(input: StartRunInput): Promise<RunResponse> {
-    if (experimentRunner.isBusy()) {
-      const activeId = experimentRunner.getActiveRunId();
+    if (experimentRunner.isBusy() || minimizerEngine.isBusy()) {
+      const activeId = experimentRunner.getActiveRunId() || minimizerEngine.getActiveMinimizationId();
       throw new ConflictError(
-        `An experiment is already in progress (Run ID: '${activeId}'). Concurrent experiments on the proxy are not permitted.`
+        `A network experiment or failure minimization is already in progress (Active ID: '${activeId}'). Concurrent proxy operations are not permitted.`
       );
     }
 

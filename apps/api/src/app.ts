@@ -19,6 +19,7 @@ import { engineRoutes } from './routes/engines.js';
 import { profileRoutes } from './routes/profiles.js';
 import { runRoutes } from './routes/runs.js';
 import { reportRoutes } from './routes/reports.js';
+import { minimizationRoutes } from './routes/minimizations.js';
 import { ApiError } from './errors/api-error.js';
 import { config } from './config.js';
 
@@ -114,6 +115,7 @@ export async function buildApp(options: FastifyServerOptions = {}): Promise<Fast
   await app.register(profileRoutes);
   await app.register(runRoutes);
   await app.register(reportRoutes);
+  await app.register(minimizationRoutes);
 
   return app;
 }

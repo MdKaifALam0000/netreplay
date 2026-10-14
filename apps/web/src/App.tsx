@@ -10,6 +10,7 @@ import { ExperimentCreatePage } from './pages/ExperimentCreatePage';
 import { RunsPage } from './pages/RunsPage';
 import { RunDetailsPage } from './pages/RunDetailsPage';
 import { RunComparisonPage } from './pages/RunComparisonPage';
+import { MinimizationPage } from './pages/MinimizationPage';
 import { NotFoundPage } from './pages/NotFoundPage';
 
 const queryClient = new QueryClient({
@@ -33,6 +34,7 @@ export const App: React.FC = () => {
               <Route path="experiments/new" element={<ExperimentCreatePage />} />
               <Route path="runs" element={<RunsPage />} />
               <Route path="runs/:id" element={<RunDetailsPage />} />
+              <Route path="minimizations/:id" element={<MinimizationPage />} />
               <Route path="compare" element={<RunComparisonPage />} />
               <Route path="*" element={<NotFoundPage />} />
             </Route>

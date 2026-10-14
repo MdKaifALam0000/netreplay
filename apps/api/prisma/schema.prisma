@@ -41,6 +41,7 @@ model Run {
   profile         Profile?        @relation(fields: [profileId], references: [id], onDelete: SetNull)
   requests        RequestResult[]
   events          RunEvent[]
+  minimizations   Minimization[]
 
   @@index([profileId])
   @@index([status])
@@ -74,4 +75,58 @@ model RunEvent {
 
   @@index([runId])
   @@index([runId, timestamp])
+}
+
+model Minimization {
+  id                     String                @id @default(cuid())
+  sourceRunId            String
+  status                 String                @default("queued") // queued, running, completed, failed, cancelled, budget_exhausted, baseline_not_reproducible
+  originalConfigSnapshot String                // Serialized JSON of original run's snapshot
+  minimizedConfig        String?               // Serialized JSON of simplest working configuration found
+  predicate              String                // Serialized JSON of failure predicate
+  minReproductionRate    Float                 @default(1.0)
+  strategy               String                @default("staged_delta_debugging")
+  maxAttempts            Int                   @default(50)
+  attemptsUsed           Int                   @default(0)
+  trialsPerCandidate     Int                   @default(1)
+  finalTrials            Int                   @default(3)
+  finalObservedRate      Float?
+  cleanupStatus          String                @default("cleaned") // cleaned, cleanup_failed
+  startedAt              DateTime?
+  finishedAt             DateTime?
+  durationMs             Int?
+  errorCode              String?
+  errorMessage           String?
+  createdAt              DateTime              @default(now())
+  updatedAt              DateTime              @updatedAt
+
+  sourceRun              Run                   @relation(fields: [sourceRunId], references: [id], onDelete: Cascade)
+  attempts               MinimizationAttempt[]
+
+  @@index([sourceRunId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model MinimizationAttempt {
+  id               String       @id @default(cuid())
+  minimizationId   String
+  attemptNumber    Int
+  stage            String       // baseline, component_reduction, parameter_minimization, verification
+  changeDesc       String       // Human-readable description of change being evaluated
+  candidateConfig  String       // Serialized JSON of candidate faults
+  triggered        Boolean      // Whether target failure was reproduced
+  trialCount       Int
+  failedTrials     Int
+  reproductionRate Float
+  durationMs       Int
+  outcome          String       // kept, rejected, baseline_verified, baseline_failed, verified
+  reason           String?
+  details          String?      // Serialized JSON details / trialResults
+  timestamp        DateTime     @default(now())
+
+  minimization     Minimization @relation(fields: [minimizationId], references: [id], onDelete: Cascade)
+
+  @@index([minimizationId])
+  @@index([minimizationId, attemptNumber])
 }

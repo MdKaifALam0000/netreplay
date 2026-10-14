@@ -444,7 +444,10 @@ export class MinimizerEngine {
         await this.toxiproxy.clearFaults();
       } catch (cleanErr: any) {
         cleanupStatus = 'cleanup_failed';
+        finalStatus = 'failed';
+        errorCode = errorCode || 'CLEANUP_FAILED';
         errorMessage = (errorMessage ? `${errorMessage}; ` : '') + `Final cleanup error: ${cleanErr.message}`;
+        console.error(`[Minimizer] Final cleanup failed for minimization ${minimizationId}:`, cleanErr);
       }
 
       this.activeMinimizationId = null;

@@ -1,0 +1,167 @@
+name: NetReplay CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-typecheck:
+    name: Typecheck & Schema Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: |
+            apps/api/package-lock.json
+            apps/web/package-lock.json
+
+      - name: Install API Dependencies
+        working-directory: ./apps/api
+        run: npm ci
+
+      - name: Install Web Dependencies
+        working-directory: ./apps/web
+        run: npm ci
+
+      - name: Validate Prisma Schema
+        working-directory: ./apps/api
+        run: npx prisma validate --schema ./prisma/schema.prisma
+
+      - name: Generate Prisma Client
+        working-directory: ./apps/api
+        run: npm run prisma:generate
+
+      - name: Run TypeScript Typecheck (API)
+        run: npm run typecheck:api
+
+      - name: Run TypeScript Typecheck (Web)
+        run: npm run typecheck:web
+
+  unit-tests:
+    name: Toxiproxy Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run Toxiproxy Engine Unit Tests
+        run: npm run test:unit
+
+  integration-and-smoke:
+    name: Integration, API & Smoke Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: |
+            apps/api/package-lock.json
+            apps/web/package-lock.json
+
+      - name: Install API Dependencies
+        working-directory: ./apps/api
+        run: npm ci
+
+      - name: Install Web Dependencies
+        working-directory: ./apps/web
+        run: npm ci
+
+      - name: Generate Prisma Client
+        working-directory: ./apps/api
+        run: npm run prisma:generate
+
+      - name: Apply Prisma Migrations (Dev DB)
+        working-directory: ./apps/api
+        run: npx prisma migrate deploy
+
+      - name: Start Docker Compose Test Infrastructure
+        run: docker compose up -d test-target toxiproxy
+
+      - name: Await Service Health
+        run: |
+          for i in $(seq 1 30); do
+            if curl -s http://127.0.0.1:3000/health > /dev/null && curl -s http://127.0.0.1:8474/version > /dev/null; then
+              echo "Services are healthy and responsive."
+              break
+            fi
+            echo "Waiting for test-target and toxiproxy ($i/30)..."
+            sleep 1
+          done
+
+      - name: Run API Tests
+        run: npm run test:api
+
+      - name: Run Web Component & Form Tests
+        run: npm run test:web
+
+      - name: Run Toxiproxy Live Integration Tests
+        run: npm run test:integration
+
+      - name: Run Live Network Fault Smoke Test
+        run: npm run test:smoke
+
+      - name: Run Emergency Fault Recovery Reset
+        if: always()
+        run: npm run clean:faults
+
+      - name: Teardown Docker Compose
+        if: always()
+        run: docker compose down -v
+
+  build-and-package:
+    name: Production Builds & Docker Packaging
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: |
+            apps/api/package-lock.json
+            apps/web/package-lock.json
+
+      - name: Install Dependencies
+        run: |
+          cd apps/api && npm ci
+          cd ../web && npm ci
+
+      - name: Generate Prisma Client
+        working-directory: ./apps/api
+        run: npm run prisma:generate
+
+      - name: Build API Production Distribution
+        run: npm run build:api
+
+      - name: Build Web Production Distribution
+        run: npm run build:web
+
+      - name: Validate Docker Compose Configuration
+        run: docker compose config
+
+      - name: Build Multi-Stage Docker Images
+        run: docker compose build

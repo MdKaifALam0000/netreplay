@@ -24,7 +24,8 @@
     "typecheck:web": "npm --prefix apps/web run typecheck",
     "prisma:generate": "npm --prefix apps/api run prisma:generate",
     "prisma:migrate": "npm --prefix apps/api run prisma:migrate",
-    "target:start": "npm --prefix services/test-target start"
+    "target:start": "npm --prefix services/test-target start",
+    "clean:faults": "node scripts/reset-faults.mjs"
   },
   "engines": {
     "node": ">=20.0.0"

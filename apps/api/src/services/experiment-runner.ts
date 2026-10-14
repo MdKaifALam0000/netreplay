@@ -290,7 +290,13 @@ export class ExperimentRunner {
         await toxiproxyService.clearFaults();
         await this.recordEvent(runId, 'fault_removed', { status: 'cleaned' });
       } catch (cleanupErr: any) {
+        console.error(`[ExperimentRunner] Cleanup failed for run ${runId}:`, cleanupErr);
         await this.recordEvent(runId, 'cleanup_error', { error: cleanupErr.message });
+        finalStatus = 'failed';
+        errorCode = errorCode || 'CLEANUP_FAILED';
+        errorMessage = errorMessage
+          ? `${errorMessage}; Cleanup failed: ${cleanupErr.message}`
+          : `Fault cleanup failed: ${cleanupErr.message}`;
       }
 
       this.activeRunId = null;

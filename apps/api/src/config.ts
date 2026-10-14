@@ -26,6 +26,8 @@ export interface AppConfig {
   logLevel: string;
   maxConcurrentRuns: number;
   corsOrigins: string[];
+  requestBodyLimit: number;
+  connectionTimeoutMs: number;
 }
 
 const defaultDbPath = path.resolve(__dirname, '..', 'prisma', 'dev.db');
@@ -44,4 +46,7 @@ export const config: AppConfig = {
   corsOrigins: process.env.CORS_ORIGINS
     ? process.env.CORS_ORIGINS.split(',').map((s) => s.trim())
     : ['http://localhost:5173', 'http://127.0.0.1:5173'],
+  requestBodyLimit: Number.parseInt(process.env.REQUEST_BODY_LIMIT_BYTES || '1048576', 10), // 1MB
+  connectionTimeoutMs: Number.parseInt(process.env.CONNECTION_TIMEOUT_MS || '30000', 10), // 30s
 };
+

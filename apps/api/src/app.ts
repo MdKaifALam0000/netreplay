@@ -25,8 +25,11 @@ import { config } from './config.js';
 
 export async function buildApp(options: FastifyServerOptions = {}): Promise<FastifyInstance> {
   const app = Fastify({
+    bodyLimit: config.requestBodyLimit,
+    connectionTimeout: config.connectionTimeoutMs,
     logger: options.logger ?? {
       level: config.logLevel,
+      redact: ['req.headers.authorization', 'req.headers.cookie'],
     },
     ...options,
   }).withTypeProvider<ZodTypeProvider>();
@@ -34,6 +37,14 @@ export async function buildApp(options: FastifyServerOptions = {}): Promise<Fast
   // Register Zod compilers
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);
+
+  // Security headers hook
+  app.addHook('onSend', async (_request, reply) => {
+    reply.header('X-Content-Type-Options', 'nosniff');
+    reply.header('X-Frame-Options', 'DENY');
+    reply.header('X-XSS-Protection', '0');
+    reply.header('Referrer-Policy', 'strict-origin-when-cross-origin');
+  });
 
   // Register CORS restricted to configured local frontend origins
   await app.register(cors, {
@@ -56,6 +67,28 @@ export async function buildApp(options: FastifyServerOptions = {}): Promise<Fast
 
   // Centralized Error Handling
   app.setErrorHandler((error, _request, reply) => {
+    // Payload too large error (413)
+    if (
+      (error as any).code === 'FST_ERR_CTP_BODY_TOO_LARGE' ||
+      (error as any).statusCode === 413
+    ) {
+      return reply.status(413).send({
+        statusCode: 413,
+        error: 'PAYLOAD_TOO_LARGE',
+        message: 'Request payload exceeds the maximum permitted limit of 1MB',
+      });
+    }
+
+    // CORS forbidden error
+    const errorMessage = (error as any)?.message || '';
+    if (errorMessage.includes('not allowed by CORS')) {
+      return reply.status(403).send({
+        statusCode: 403,
+        error: 'FORBIDDEN',
+        message: errorMessage,
+      });
+    }
+
     // Schema / Zod validation errors
     if (
       error instanceof ZodError ||

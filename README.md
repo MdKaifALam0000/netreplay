@@ -1,27 +1,27 @@
 # NetReplay — Network Failure Reproduction Platform
 
-NetReplay is an open-source network failure reproduction platform designed to help engineers simulate, capture, reliably replay, and automatically minimize complex distributed system network faults (latency, packet drops, bandwidth throttles, TCP connection resets, and timeouts).
+NetReplay is an open-source network failure reproduction engine designed to help engineers simulate, capture, reliably replay, and automatically minimize complex distributed system network faults (latency, packet drops, bandwidth throttles, TCP connection resets, and timeouts).
 
-This repository implements **Step 5: Automatic Failure Minimization Engine**, building on the Step 1 Docker test target / Toxiproxy infrastructure, Step 2 reusable engine adapter, Step 3 Fastify REST API & SQLite persistence, and Step 4 React dashboard & telemetry visualization.
+This repository implements **Step 6: Production Hardening, Security, Docker, and CI/CD**, hardening the complete multi-tier architecture: Step 1 Docker test target / Toxiproxy infrastructure, Step 2 reusable engine adapter, Step 3 Fastify REST API & SQLite persistence, Step 4 React dashboard & telemetry visualization, and Step 5 Automatic failure minimization engine.
 
 ---
 
 ## Table of Contents
 
 1. [Architecture & Topology](#architecture--topology)
-2. [What Step 5 Adds (Automatic Failure Minimization)](#what-step-5-adds-automatic-failure-minimization)
-3. [How the Minimization Search Works](#how-the-minimization-search-works)
-4. [Supported Failure Predicates & Fault Types](#supported-failure-predicates--fault-types)
-5. [Search Budgets, Trial Policies & Reproduction Rates](#search-budgets-trial-policies--reproduction-rates)
-6. [Empirical Search Bounds & Mathematical Limitations](#empirical-search-bounds--mathematical-limitations)
-7. [Cleanup, Concurrency & Isolation Safeguards](#cleanup-concurrency--isolation-safeguards)
-8. [Dashboard Pages and Features](#dashboard-pages-and-features)
+2. [What Step 6 Adds (Hardening, Security, Docker, CI/CD)](#what-step-6-adds-hardening-security-docker-cicd)
+3. [Security Architecture & Defensive Boundaries](#security-architecture--defensive-boundaries)
+4. [Reliable Fault Cleanup & Disaster Recovery](#reliable-fault-cleanup--disaster-recovery)
+5. [Docker Compose & Container Deployment](#docker-compose--container-deployment)
+6. [GitHub Actions CI/CD Pipeline](#github-actions-cicd-pipeline)
+7. [Automatic Failure Minimization Engine](#automatic-failure-minimization-engine)
+8. [Dashboard Pages & Features](#dashboard-pages--features)
 9. [REST API Contract (`/api/v1`)](#rest-api-contract-apiv1)
-10. [Prerequisites & Environment Configuration](#prerequisites--environment-configuration)
+10. [Environment Configuration & Secrets Management](#environment-configuration--secrets-management)
 11. [Quickstart & PowerShell Commands](#quickstart--powershell-commands)
-12. [Running Automated Tests](#running-automated-tests)
-13. [Operational Safety & Limitations](#operational-safety--limitations)
-14. [Troubleshooting Guide](#troubleshooting-guide)
+12. [Running Automated Verification & Tests](#running-automated-verification--tests)
+13. [Dependency & Code Quality Audit](#dependency--code-quality-audit)
+14. [Troubleshooting & Emergency Recovery Guide](#troubleshooting--emergency-recovery-guide)
 15. [License](#license)
 
 ---
@@ -36,7 +36,7 @@ This repository implements **Step 5: Automatic Failure Minimization Engine**, bu
 |  |             React Web Dashboard (`apps/web`) — Port :5173   |                                 |
 |  |                                                             |                                 |
 |  |  * Views: Overview, Profiles, Experiment Builder,           |                                 |
-|  |           Runs, Run Details, Run Comparison                 |                                 |
+|  |           Runs, Run Details, Run Comparison, Minimization   |                                 |
 |  |  * Recharts: Latency timeline & bucket distribution         |                                 |
 |  |  * TanStack Query: Bounded polling for active runs          |                                 |
 |  +------------------------------+------------------------------+                                 |
@@ -46,11 +46,12 @@ This repository implements **Step 5: Automatic Failure Minimization Engine**, bu
 |  +------------------------------------------------------------------------------+                |
 |  |                 Fastify REST API (`apps/api`) — Port :3100                   |                |
 |  |                                                                              |                |
-|  |  * Routes: Health, Engines, Profiles, Runs, Replay, Reports                  |                |
-|  |  * Schemas: Strict Zod validation with TypeProviderZod                       |                |
+|  |  * Security: 1MB Body Limit, Security Headers, Redacted Auth Logging         |                |
+|  |  * Routes: Health, Engines, Profiles, Runs, Replay, Reports, Minimization   |                |
+|  |  * Schemas: Strict Zod validation with fastify-type-provider-zod            |                |
 |  |  * OpenAPI: Swagger UI live at http://127.0.0.1:3100/docs                    |                |
-|  |  * Storage: SQLite via Prisma ORM (`apps/api/prisma/dev.db`)                 |                |
-|  |  * Runner: Monotonic clock (`performance.now()`), 1 active run/proxy lock    |                |
+|  |  * Storage: SQLite via Prisma ORM (`apps/api/prisma/dev.db` / Docker Vol)   |                |
+|  |  * Concurrency: Strict 1-active-experiment mutex per proxy                   |                |
 |  +-----------------------+-----------------------------+------------------------+                |
 |                          |                             |                                         |
 |                          | Imports                     | Direct HTTP Calls                       |
@@ -72,131 +73,212 @@ This repository implements **Step 5: Automatic Failure Minimization Engine**, bu
 |  |     netreplay-toxiproxy     |               |     netreplay-test-target      |                |
 |  |                             |   TCP Fwd     |                                |                |
 |  |  * Control API: :8474       |-------------->|  * Port: :3000                 |                |
-|  |  * Traffic Listener: :8666  |               |  * Healthcheck: /health        |                |
-|  |  * Toxics: latency, timeout,|               |  * Endpoints: /api/demo        |                |
-|  |            bandwidth, reset |               |               /api/slow        |                |
+|  |    (Bound strictly to       |               |  * Healthcheck: /health        |                |
+|  |     127.0.0.1 loopback)     |               |  * Endpoints: /api/demo        |                |
+|  |  * Traffic Listener: :8666  |               |               /api/slow        |                |
+|  |  * Toxics: latency, timeout,|               |  * Runs as unprivileged node   |                |
+|  |            bandwidth, reset |               |                                |                |
 |  +-----------------------------+               +--------------------------------+                |
 +--------------------------------------------------------------------------------------------------+
 ```
 
 ---
 
-## What Step 5 Adds (Automatic Failure Minimization)
+## What Step 6 Adds (Hardening, Security, Docker, CI/CD)
 
-The **Automatic Failure Minimization Engine** takes an existing failed experiment run and systematically searches for the simplest network fault configuration that still reproduces the target failure condition.
+Step 6 hardens the entire NetReplay codebase for enterprise reliability, audit compliance, and automated deployment:
 
-When an experiment with multiple interacting network faults causes a failure (e.g. latency + jitter + packet bandwidth throttle + TCP reset), it is often unclear which fault is truly necessary and which are incidental. The minimizer resolves this ambiguity through an automated staged search:
+1. **Security & Defensive Boundaries**:
+   - Explicit loopback `127.0.0.1` port bindings across all services.
+   - Isolation of the Toxiproxy control API to internal / local boundaries.
+   - Strict target URL whitelisting (preventing SSRF and open-proxy vulnerabilities).
+   - 1MB request payload limits (HTTP 413 `PAYLOAD_TOO_LARGE`) and 30-second connection timeouts.
+   - Standard security response headers (`X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`, `X-XSS-Protection`).
+   - Logging redaction for sensitive headers (`authorization`, `cookie`).
+   - Error masking to prevent stack trace or credential leakage.
+
+2. **Reliable Fault Cleanup & Recovery**:
+   - Guaranteed cleanup in `finally` blocks for both experiment runs and minimization iterations.
+   - Cleanup failures mark runs and minimizations as `failed` with `CLEANUP_FAILED` error codes (never silently marked as completed).
+   - Bounded graceful shutdown (5-second force-termination timeout on SIGINT/SIGTERM).
+   - Dedicated manual recovery utility (`npm run clean:faults` / `scripts/reset-faults.mjs`).
+
+3. **Multi-Stage Docker Deployment**:
+   - Production multi-stage Dockerfiles for `apps/api` (Node 22 Alpine, non-root `node` user, Prisma deploy) and `apps/web` (Nginx 1.27 Alpine, SPA fallback, security headers).
+   - Full-stack `docker-compose.yml` supporting all 4 services with pinned versions, container healthchecks, and persistent volume (`netreplay-api-data`).
+
+4. **GitHub Actions CI/CD Pipeline**:
+   - End-to-end automated workflow (`.github/workflows/ci.yml`) covering clean install (`npm ci`), Prisma validation, TypeScript typechecks (`api` and `web`), Toxiproxy unit tests, Docker Compose integration tests, live network smoke tests, production builds, and Docker packaging.
+
+---
+
+## Security Architecture & Defensive Boundaries
+
+### 1. Loopback Interface Binding & Private Control API
+- **Why Toxiproxy Control Must Remain Private**: Toxiproxy's HTTP management API (`http://127.0.0.1:8474`) allows arbitrary TCP proxy creation, manipulation, and network toxic injection without authentication. If exposed to public host interfaces or the internet, an attacker could route arbitrary traffic or disrupt services.
+- **Enforcement**: In `docker-compose.yml`, all ports are explicitly bound to `127.0.0.1` (`"127.0.0.1:8474:8474"` and `"127.0.0.1:8666:8666"`). Fastify API acts as the sole, authenticated gatekeeper for proxy mutations.
+
+### 2. Network Target Restrictions (Anti-SSRF / Anti-Open-Proxy)
+- NetReplay is **not** a general-purpose proxy and cannot be used to probe internal cloud metadata (`169.254.169.254`), intranet hosts, or arbitrary upstream URLs.
+- **Validation**:
+  - `TargetConfigDetailsSchema` in `apps/api/src/schemas/profile.ts` enforces that target paths must be relative paths starting with `/` (e.g. `/api/demo`, `/api/slow`).
+  - Inputs containing `://` (schemes like `http://`, `https://`, `file://`) are rejected immediately with HTTP 400 `BAD_REQUEST`.
+  - Target base URLs are strictly resolved via server-side configuration (`TEST_TARGET_PROXY_URL`).
+
+### 3. Request Size & Timeout Limits
+- Fastify application factory (`buildApp` in `apps/api/src/app.ts`) configures `bodyLimit: 1048576` (1MB).
+- Payloads exceeding 1MB are rejected with HTTP 413 `PAYLOAD_TOO_LARGE`.
+- Server connections enforce `connectionTimeout: 30000` (30 seconds) to prevent slowloris resource exhaustion.
+
+### 4. CORS Policy
+- CORS is restricted to explicit allowed origins via `@fastify/cors`:
+  ```ts
+  corsOrigins: ['http://localhost:5173', 'http://127.0.0.1:5173']
+  ```
+- Requests from unlisted origins receive HTTP 403 `FORBIDDEN`.
+- Unrestricted wildcard (`*`) origins with credentials are expressly prohibited.
+
+### 5. Error Masking & Redacted Logging
+- Centralized error handler catches internal errors and masks internal details. Clients receive:
+  ```json
+  {
+    "statusCode": 500,
+    "error": "INTERNAL_SERVER_ERROR",
+    "message": "An unexpected internal server error occurred"
+  }
+  ```
+- Stack traces, database file paths, and environment variables are never exposed in API responses.
+- Pino logger redacts `req.headers.authorization` and `req.headers.cookie`.
+
+### 6. Concurrency Locking
+- Both `ExperimentRunner` and `MinimizationService` maintain in-memory mutexes.
+- Attempting to launch a run or minimization while another is active immediately returns HTTP 409 `CONFLICT`:
+  ```json
+  {
+    "statusCode": 409,
+    "error": "CONFLICT",
+    "message": "A network experiment or failure minimization is already in progress. Concurrent proxy operations are not permitted."
+  }
+  ```
+
+### 7. Trusted Environment Notice
+> [!IMPORTANT]
+> NetReplay is architected for trusted local development, CI pipelines, and isolated testing environments. It does not contain user authentication or role-based access control (RBAC). It should **never** be exposed directly to the public internet without an authenticating reverse proxy or VPN boundary.
+
+---
+
+## Reliable Fault Cleanup & Disaster Recovery
+
+Fault injection inherently risks leaving toxic rules active on network proxies, which could disrupt subsequent tests or local services. NetReplay implements multiple defensive layers to guarantee clean state restoration:
+
+1. **Guaranteed `finally` Blocks**:
+   - `ExperimentRunner.execute()` and `MinimizerEngine.execute()` always invoke `toxiproxyService.clearFaults()` in their `finally` blocks.
+2. **Cancellation Handling**:
+   - When a user cancels a run (`POST /api/v1/runs/:id/cancel`) or minimization (`POST /api/v1/minimizations/:id/cancel`), active `AbortController` signals terminate in-flight requests and immediately trigger fault cleanup.
+3. **Visibility of Cleanup Failures**:
+   - If Toxiproxy is unreachable or returns an error during cleanup, the run or minimization is **explicitly marked as `failed`** with `errorCode: 'CLEANUP_FAILED'` and a descriptive message. It is **never** silently marked as successful.
+4. **Proxy Scoping**:
+   - `clearFaults(proxyName)` clears toxics only from the specific target proxy (`netreplay-demo`). It never deletes unrelated proxies or issues global engine wipes.
+5. **Bounded Graceful Shutdown**:
+   - Fastify API listens for `SIGINT` and `SIGTERM`. If shutdown does not complete within 5 seconds (e.g., due to an in-flight socket lock), force-termination occurs.
+6. **Manual Emergency Reset Script**:
+   - NetReplay includes an emergency operator tool that inspects and restores proxy state:
+     ```powershell
+     npm run clean:faults
+     # Or directly:
+     node scripts/reset-faults.mjs [optional-proxy-name]
+     ```
+
+---
+
+## Docker Compose & Container Deployment
+
+NetReplay provides a complete, reproducible multi-container stack orchestrated via `docker-compose.yml`.
+
+### Services
+
+| Service | Container Name | Image / Build | Port Bindings | Purpose |
+| :--- | :--- | :--- | :--- | :--- |
+| `test-target` | `netreplay-test-target` | Multi-stage (`node:22-alpine`) | `127.0.0.1:3000:3000` | Deterministic HTTP target (`/api/demo`, `/api/slow`, `/health`) |
+| `toxiproxy` | `netreplay-toxiproxy` | `ghcr.io/shopify/toxiproxy:2.12.0` | `127.0.0.1:8474:8474`<br>`127.0.0.1:8666:8666` | L4/L7 TCP fault proxy engine |
+| `api` | `netreplay-api` | Multi-stage (`node:22-alpine`) | `127.0.0.1:3100:3100` | Fastify REST API & SQLite persistence |
+| `web` | `netreplay-web` | Multi-stage (`nginx:1.27-alpine`) | `127.0.0.1:5173:5173` | React Dashboard & SPA web server |
+
+### Local Docker Workflow Commands
+
+```powershell
+# 1. Validate Docker Compose configuration
+docker compose config
+
+# 2. Build multi-stage container images reproducibly from lockfile
+docker compose build
+
+# 3. Start all services in the background
+docker compose up -d
+
+# 4. Check container health status
+docker compose ps
+
+# 5. Inspect application logs
+docker compose logs -f --tail 100
+
+# 6. Stop and remove containers cleanly
+docker compose down
+```
+
+---
+
+## GitHub Actions CI/CD Pipeline
+
+NetReplay includes a continuous integration pipeline (`.github/workflows/ci.yml`) that runs on every push and pull request to `main`:
+
+```
++-----------------------------------------------------------------------------+
+|                            GitHub Actions CI Workflow                       |
++-----------------------------------------------------------------------------+
+  |
+  +--> Job 1: Typecheck & Schema Validation
+  |      * Clean install with npm ci (Node 22)
+  |      * Prisma schema validation: npx prisma validate
+  |      * Prisma client generation: npm run prisma:generate
+  |      * TypeScript checks: npm run typecheck:api & npm run typecheck:web
+  |
+  +--> Job 2: Toxiproxy Unit Tests
+  |      * Pure Node.js unit tests: npm run test:unit (37 tests)
+  |
+  +--> Job 3: Integration, API & Smoke Tests
+  |      * Spin up Docker Compose: docker compose up -d test-target toxiproxy
+  |      * Await container healthchecks
+  |      * Execute Fastify API test suite: npm run test:api (52 tests)
+  |      * Execute React Web component test suite: npm run test:web (19 tests)
+  |      * Execute Toxiproxy live integration: npm run test:integration (6 tests)
+  |      * Execute live network smoke test: npm run test:smoke (+500ms delta check)
+  |      * Emergency fault cleanup reset: npm run clean:faults
+  |      * Teardown Docker Compose: docker compose down -v
+  |
+  +--> Job 4: Production Builds & Docker Packaging
+         * Production compile API: npm run build:api
+         * Production compile Web SPA: npm run build:web
+         * Validate compose config: docker compose config
+         * Build multi-stage Docker images: docker compose build
+```
+
+---
+
+## Automatic Failure Minimization Engine
+
+The **Automatic Failure Minimization Engine** takes an existing failed experiment run and systematically searches for the simplest network fault configuration that still reproduces the target failure condition:
 
 1. **Delta-Debugging Component Reduction**: Eliminates unnecessary fault components one by one and in pairs.
-2. **Numeric Parameter Minimization**: Binary searches numeric parameters (e.g., latency duration, timeout thresholds, jitter) down to the lowest value that still trips the failure predicate.
+2. **Numeric Parameter Minimization**: Binary searches numeric parameters (latency, timeout thresholds, jitter) down to the lowest value that still trips the failure predicate.
 3. **Multi-Trial Stochastic Verification**: Accounts for network nondeterminism through configurable trial policies and reproduction rate thresholds.
 4. **Interactive Dashboard Integration**: A "Minimize Failure" dialog on Run Details launches jobs, links directly to the Minimization Progress & Diff view (`/minimizations/:id`), and clearly explains parameter reductions and removed components.
 
 ---
 
-## How the Minimization Search Works
+## Dashboard Pages & Features
 
-Minimization executes sequentially across four distinct stages:
-
-```
-+--------------------------------------------------------------------------------------------------+
-|                                    MINIMIZATION WORKFLOW                                         |
-|                                                                                                  |
-|  [Stage A: Validate Baseline]                                                                    |
-|    * Re-evaluates source run's original fault configuration snapshot.                            |
-|    * If target failure does NOT reproduce, halts with status: `baseline_not_reproducible`.       |
-|    * Source run history and measurements remain completely immutable.                            |
-|                                     | (Baseline passes)                                          |
-|                                     v                                                            |
-|  [Stage B: Component Reduction (Delta Debugging)]                                                |
-|    * Evaluates candidate configurations with individual fault components removed.                |
-|    * If failure still reproduces: removal is KEPT (component was unnecessary).                  |
-|    * If failure disappears: removal is REJECTED (component is restored).                         |
-|    * Tests pairwise removals for interacting faults.                                             |
-|                                     |                                                            |
-|                                     v                                                            |
-|  [Stage C: Numeric Parameter Minimization]                                                       |
-|    * For latency faults: first attempts to reduce jitter to 0 ms.                                |
-|    * Binary searches `latencyMs` between 0 and baseline latency to find the threshold.          |
-|    * Binary searches `timeoutMs` or bandwidth throttles.                                         |
-|                                     |                                                            |
-|                                     v                                                            |
-|  [Stage D: Verification & Final Trial Policy]                                                    |
-|    * Re-evaluates final minimized candidate using configured verification trials (e.g. 3 to 5).  |
-|    * Validates that observed reproduction rate meets or exceeds the required threshold.          |
-|    * Marks job `completed` with detailed configuration diff and attempt audit history.           |
-+--------------------------------------------------------------------------------------------------+
-```
-
----
-
-## Supported Failure Predicates & Fault Types
-
-### Supported Failure Predicates
-Predicates define what observable condition constitutes a successful reproduction of the target bug:
-
-| Predicate Type | Identifier | Condition Checked | Parameters |
-| :--- | :--- | :--- | :--- |
-| **HTTP 5xx Server Error** | `status_5xx` | HTTP response status is between 500 and 599 | `statusCode` (optional, e.g. 500, 502, 503) |
-| **Deadline Exceeded** | `deadline_exceeded` | Request latency or timeout exceeds threshold | `deadlineMs` (required integer, 1 to 60000 ms) |
-| **Connection Reset** | `connection_reset` | TCP socket abruptly closed, ECONNRESET, EPIPE | None |
-| **Network Error** | `network_error` | Request fails with a network exception | `errorCategory` (optional, e.g. `ETIMEDOUT`) |
-| **Missing Response** | `response_missing` | Request timed out or response body dropped | None |
-| **Exact Status Code** | `status_code` | Exact HTTP status assertion | `statusCode` (required integer, 100 to 599) |
-
-### Infrastructure Error Isolation
-The evaluator strictly distinguishes the target application bug from infrastructure outages:
-- If Toxiproxy control plane (:8474) or the test target container (:3000) becomes unreachable due to external crashes, the trial is flagged as an infrastructure error (`isInfraError: true`).
-- Infrastructure failures are **never** counted as a successful reproduction of the target bug.
-
-### Supported Fault Types
-Uses the validated Toxiproxy adapter schema:
-- `latency`: `latencyMs` (0 to 60,000 ms), `jitterMs` (0 to 30,000 ms), `toxicity`, `stream`.
-- `timeout`: `timeoutMs` (0 to 60,000 ms), `stream`.
-- `bandwidth`: `rateKbps` (1 to 1,000,000 kbps), `stream`.
-- `reset` / `reset_peer`: TCP connection reset.
-
----
-
-## Search Budgets, Trial Policies & Reproduction Rates
-
-Because real-world network reproduction cannot run indefinitely, search parameters are bounded with conservative defaults:
-
-- **Attempt Budget (`maxAttempts`)**: Maximum candidate configurations evaluated (default: 50, upper bound: 200). If budget is exhausted, the engine terminates with `budget_exhausted` and returns the best partial configuration discovered so far.
-- **Wall-Clock Deadline (`deadlineSeconds`)**: Total maximum search duration (default: 300s / 5 minutes, upper bound: 900s / 15 minutes).
-- **Exploration Trials (`trialsPerCandidate`)**: Probes executed for each candidate during reduction (default: 1, range: 1 to 10).
-- **Verification Trials (`finalTrials`)**: Repeated evaluations on the final minimized candidate (default: 3, range: 1 to 20).
-- **Reproduction Rate Threshold (`minReproductionRate`)**: Fraction of trials required to trigger (default: 1.0 = 100%, range: 0.1 to 1.0). For stochastic network failures, setting `0.8` allows the engine to accept candidates that reproduce the failure at least 80% of the time.
-
----
-
-## Empirical Search Bounds & Mathematical Limitations
-
-> **Important Conceptual Note**:
-> NetReplay reports the **smallest fault configuration found within the configured search strategy, attempt budget, and time limit**.
->
-> In real distributed systems:
-> 1. Network behaviors can be **nondeterministic** (stochastic packet loss, variable scheduling latency).
-> 2. Certain application retry backoffs or circuit breakers exhibit **non-monotonic** behavior (where an intermediate delay trips a threshold that a higher or lower delay does not).
->
-> Therefore, failure minimization provides an **empirical minimum within the bounded exploration space**, not a formal mathematical proof of a global minimum.
-
----
-
-## Cleanup, Concurrency & Isolation Safeguards
-
-1. **Per-Proxy Concurrency Lock**: Only one experiment run or failure minimization job can manipulate the target proxy (`netreplay-demo`) at any given time. Colliding starts are rejected with `409 Conflict`.
-2. **Guaranteed Fault Cleanup**: Every candidate evaluation runs within a strict `try ... finally` block that invokes `toxiproxyService.clearFaults()`.
-3. **Cancellation Safety**: Cancellation immediately aborts the active search loop and triggers proxy cleanup so no toxic remains active.
-4. **Cleanup Failure Visibility**: If Toxiproxy fails to respond during cleanup, the job surfaces `cleanupStatus: "cleanup_failed"` and marks the record with high-severity alert details.
-5. **Zero Host Mutation**: No host iptables, shell commands, or arbitrary URLs are touched. Probes are restricted exclusively to the isolated local test container.
-6. **Immutability of Source Runs**: The source run's original snapshot, status, and telemetry measurements are never modified.
-
----
-
-## Dashboard Pages and Features
-
-| Page Route | Component | Key Features |
+| Route | Component | Key Capabilities |
 | :--- | :--- | :--- |
 | `/` | `OverviewPage` | Live Toxiproxy (:8474) & Fastify (:3100) health cards, total profiles/runs stats, recent runs audit table, one-click quick profile launch. |
 | `/profiles` | `ProfilesPage` | Searchable profile grid, tag filtering, profile creation/edit dialogs, delete confirmation with active-run safety checks, quick launch buttons. |
@@ -208,24 +290,13 @@ Because real-world network reproduction cannot run indefinitely, search paramete
 
 ---
 
-## Frontend Stack & Architecture
-
-- **Framework**: React 18 + Vite 6
-- **Routing**: React Router DOM v6
-- **State & Caching**: TanStack Query v5 with bounded polling
-- **Styling**: Tailwind CSS with custom developer dark palette
-- **Charts**: Recharts v2 (ResponsiveContainer, AreaChart, BarChart, LineChart)
-- **Icons**: Lucide React
-- **Validation**: Zod + TypeScript strict mode
-- **Testing**: Vitest + React Testing Library + jsdom
-
----
-
 ## REST API Contract (`/api/v1`)
 
-The frontend interacts with the backend strictly via `/api/v1`:
-
-- **Health & Engines**: `GET /health`, `GET /api/v1/health`, `GET /api/v1/engines`, `GET /api/v1/engines/toxiproxy`
+- **Health & Engines**:
+  - `GET /health` — Fast process liveness probe (HTTP 200).
+  - `GET /api/v1/health` — Readiness probe (inspects SQLite DB connectivity and Toxiproxy engine status).
+  - `GET /api/v1/engines` — Lists registered fault engines (`toxiproxy`).
+  - `GET /api/v1/engines/toxiproxy` — Detailed Toxiproxy health and version.
 - **Profiles**: `GET /api/v1/profiles`, `POST /api/v1/profiles`, `GET /api/v1/profiles/:id`, `PATCH /api/v1/profiles/:id`, `DELETE /api/v1/profiles/:id`
 - **Runs**: `POST /api/v1/runs`, `GET /api/v1/runs`, `GET /api/v1/runs/:id`, `GET /api/v1/runs/:id/events`, `GET /api/v1/runs/:id/requests`, `POST /api/v1/runs/:id/replay`, `POST /api/v1/runs/:id/cancel`
 - **Automatic Failure Minimization**:
@@ -234,123 +305,156 @@ The frontend interacts with the backend strictly via `/api/v1`:
   - `GET /api/v1/minimizations/:id/attempts` — retrieves complete attempt history detailing each fault candidate evaluated, trial counts, and outcomes.
   - `POST /api/v1/minimizations/:id/cancel` — requests cancellation of an active search and cleanly restores proxy state.
 - **Reports**: `GET /api/v1/runs/:id/report?format=json`, `GET /api/v1/runs/:id/report?format=markdown`
-- **Documentation**: Swagger UI at `http://127.0.0.1:3100/docs`
+- **Interactive Documentation**: Swagger UI live at `http://127.0.0.1:3100/docs`
 
 ---
 
-## Prerequisites & Environment Configuration
+## Environment Configuration & Secrets Management
 
-### Prerequisites
-- **Node.js LTS** (v20+, v22+, or v24+)
-- **Docker Desktop for Windows** (running)
+Configuration is handled via `.env.example` templates with safe defaults for local development:
 
-### Environment Files
-- `apps/api/.env`:
-  ```env
-  API_PORT=3100
-  HOST=127.0.0.1
-  DATABASE_URL="file:./dev.db"
-  CORS_ORIGINS="http://localhost:5173,http://127.0.0.1:5173"
-  ```
-- `apps/web/.env`:
-  ```env
-  VITE_API_BASE_URL="http://127.0.0.1:3100"
-  ```
+```env
+# Node Environment
+NODE_ENV=development
+
+# Host Port Bindings
+TEST_TARGET_PORT=3000
+TOXIPROXY_CONTROL_PORT=8474
+TOXIPROXY_LISTEN_PORT=8666
+API_PORT=3100
+API_HOST=127.0.0.1
+WEB_PORT=5173
+
+# Database
+DATABASE_URL="file:../prisma/dev.db"
+
+# Internal Engine URLs
+TOXIPROXY_CONTROL_URL=http://127.0.0.1:8474
+TOXIPROXY_PROXY_NAME=netreplay-demo
+TEST_TARGET_DIRECT_URL=http://127.0.0.1:3000
+TEST_TARGET_PROXY_URL=http://127.0.0.1:8666
+
+# Security & Request Limits
+CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+REQUEST_BODY_LIMIT_BYTES=1048576
+CONNECTION_TIMEOUT_MS=30000
+LOG_LEVEL=info
+
+# Frontend Client Public Base URL (never put secrets here)
+VITE_API_BASE_URL=http://127.0.0.1:3100
+```
 
 ---
 
 ## Quickstart & PowerShell Commands
 
-### 1. Start Docker Containers
-```powershell
-npm run up
-```
+### Local Development Setup
 
-### 2. Initialize Backend Database
 ```powershell
+# 1. Start background infrastructure (test target & Toxiproxy)
+npm run up
+
+# 2. Run database migrations
 npm run prisma:generate
 npm run prisma:migrate
-```
 
-### 3. Start Backend & Frontend Together
-In Terminal 1 (Fastify API):
-```powershell
+# 3. Start Fastify API (Terminal 1)
 npm run dev:api
-```
-*(Listening at `http://127.0.0.1:3100`)*
+# Listens on http://127.0.0.1:3100
 
-In Terminal 2 (React Dashboard):
-```powershell
+# 4. Start React Web Dashboard (Terminal 2)
 npm run dev:web
+# Listens on http://127.0.0.1:5173
 ```
-*(Listening at `http://127.0.0.1:5173`)*
 
 Open your browser to: **`http://127.0.0.1:5173`**
 
 ---
 
-## Running Automated Tests
+## Running Automated Verification & Tests
 
-All test suites can be executed independently or together:
+NetReplay features a comprehensive automated test suite with **114 passing automated tests**:
 
-### 1. Run Complete Test Suite (Unit + API + Web)
-Executes all 99 automated tests across all tiers:
 ```powershell
+# 1. Run All Tests (Unit + API + Web + Security)
 npm test
-```
 
-### 2. Failure Minimization & Backend API Integration Suite (Vitest)
-Executes 43 tests in `apps/api/test/` covering baseline verification, component reduction delta-debugging, numeric binary search minimization, multi-trial verification policies, stochastic rate accounting, budget and deadline exhaustion, cancellation cleanup, proxy locking, and REST endpoints:
-```powershell
+# 2. Run Toxiproxy Engine Unit Tests (37 tests)
+npm run test:unit
+
+# 3. Run Fastify REST API & Security Test Suite (52 tests)
 npm run test:api
-```
 
-### 3. Frontend React Component, Chart & Client Tests (Vitest)
-Executes 19 tests in `apps/web/test/` covering minimization API client calls, Button duplicate submission prevention, StatusBadge lifecycle styles, Recharts empty/populated states, and form validations:
-```powershell
+# 4. Run React Dashboard Component & Client Suite (19 tests)
 npm run test:web
-```
 
-### 4. Frontend Production Build & Type Check
-```powershell
+# 5. Run Live Integration Suite (6 tests)
+npm run test:integration
+
+# 6. Run Live Network Smoke Test (Validates ~500ms injected latency)
+npm run test:smoke
+
+# 7. Run TypeScript Typechecking
+npm run typecheck:api
 npm run typecheck:web
+
+# 8. Run Production Builds
+npm run build:api
 npm run build:web
 ```
 
-### 5. Step 2 Toxiproxy Adapter Unit Tests
-Executes 37 tests in `packages/toxiproxy/test/`:
-```powershell
-npm run test:unit
-```
+---
 
-### 6. Live Step 1 & 2 Network Smoke Test
-```powershell
-npm run test:smoke
-```
+## Dependency & Code Quality Audit
+
+A security audit (`npm audit`) was performed across all workspaces:
+
+- **Audit Findings**:
+  - `tinypool` / `@vitest/mocker`: Dev-dependencies used strictly by Vitest for local test execution. Upgrading would require `vitest@5`, which introduces breaking changes to the test suite.
+  - `braces` / `postcss-selector-parser`: Dev-dependencies in Tailwind CSS v3 build chain. Resolving requires Tailwind v4, which deprecates existing CSS `@tailwind` configurations.
+  - `react-router-dom`: Router v6 dev dependency. Resolving requires React Router v7, which rewrites route definitions.
+  - `@fastify/static`: Nested inside `@fastify/swagger-ui`. Resolving requires a major version upgrade.
+- **Decision & Rationale**:
+  - In accordance with production stability best practices, breaking major upgrades were **not forced**.
+  - All application dependencies used in runtime production builds were verified.
+  - Development tools are isolated to local testing environments and omitted from production container stages (`npm ci --omit=dev`).
 
 ---
 
-## Operational Safety & Limitations
+## Troubleshooting & Emergency Recovery Guide
 
-1. **Local Test Target Whitelisting**: The dashboard only accepts probe paths targeting the verified local container (`/api/demo`, `/api/slow`, `/health`). Arbitrary external hostnames, shell commands, or raw IPs cannot be entered.
-2. **Private Control API**: Port `8474` (Toxiproxy Control) is never called by the browser; all toxic mutations happen securely through the Fastify API.
-3. **Bounded Polling**: TanStack Query polls active runs every 1 to 1.5 seconds and immediately disables interval polling when the run reaches `completed`, `failed`, or `cancelled`.
-4. **Single Active Run Concurrency**: The backend prevents concurrent experiments against the same proxy to avoid contaminated latency measurements. The UI displays clear `409 Conflict` feedback if a collision is attempted.
+### 1. Lingering Network Faults or Stuck Latency
+If an experiment was interrupted abruptly (e.g. process kill) and latency persists:
+```powershell
+npm run clean:faults
+```
+*Inspects `netreplay-demo` on Toxiproxy and deletes any active toxics.*
 
----
+### 2. "Unable to connect to NetReplay API"
+- Verify the Fastify API process is running on port 3100 (`npm run dev:api`).
+- Verify `VITE_API_BASE_URL` in `apps/web/.env` is set to `http://127.0.0.1:3100`.
 
-## Troubleshooting Guide
+### 3. "CORS Error: Origin not allowed"
+- The API restricts access to `http://localhost:5173` and `http://127.0.0.1:5173`.
+- If accessing from a custom host or port, add it to `CORS_ORIGINS` in your `.env`.
 
-### 1. "Unable to connect to NetReplay API"
-- Ensure the API is running on port 3100 (`npm run dev:api`).
-- Check `VITE_API_BASE_URL` in `apps/web/.env` is set to `http://127.0.0.1:3100`.
+### 4. Toxiproxy Engine Status Shows "Offline"
+- Check that the Toxiproxy container is running: `docker compose ps`.
+- Verify port 8474 responds:
+  ```powershell
+  curl.exe http://127.0.0.1:8474/version
+  ```
+- If stopped, restart:
+  ```powershell
+  docker compose up -d toxiproxy
+  ```
 
-### 2. "CORS Error: Origin not allowed"
-- The Fastify backend allows `http://localhost:5173` and `http://127.0.0.1:5173` by default. If using a custom port, add it to `CORS_ORIGINS` in `apps/api/.env`.
-
-### 3. Toxiproxy Status Shows "Offline"
-- Verify Docker Desktop is running: `docker compose ps`.
-- Check port 8474 is bound: `curl.exe http://127.0.0.1:8474/version`.
+### 5. SQLite Database Migration / Schema Out of Sync
+- Run Prisma migrations:
+  ```powershell
+  npm run prisma:generate
+  npm run prisma:migrate
+  ```
 
 ---
 

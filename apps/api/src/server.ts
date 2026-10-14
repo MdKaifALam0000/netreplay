@@ -28,14 +28,20 @@ async function start() {
     process.exit(1);
   }
 
-  // Graceful shutdown
+  // Graceful shutdown with bounded 5-second timeout
   const shutdown = async (signal: string) => {
     console.log(`\n[API] Received ${signal}. Shutting down gracefully...`);
+    const forceExitTimer = setTimeout(() => {
+      console.error('[API] Graceful shutdown deadline exceeded (5s). Forcing termination.');
+      process.exit(1);
+    }, 5000);
+    forceExitTimer.unref();
+
     try {
       await app.close();
       // Ensure any lingering faults on the proxy are cleared
-      await toxiproxyService.clearFaults();
-      await disconnectDb();
+      await toxiproxyService.clearFaults().catch(() => {});
+      await disconnectDb().catch(() => {});
       console.log('[API] Shutdown complete.');
       process.exit(0);
     } catch (err) {

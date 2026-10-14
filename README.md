@@ -241,16 +241,23 @@ docker compose logs -f toxiproxy
 
 ## Toxiproxy HTTP API Guide
 
-Toxiproxy communicates via a JSON REST API on port `8474`. You can inspect or modify proxies and faults directly from PowerShell:
+Toxiproxy communicates via a JSON REST API on port `8474`.
+
+> [!NOTE]
+> **Windows PowerShell User-Agent Note**: Toxiproxy includes built-in anti-CSRF protection that blocks requests with browser-like user agents (e.g., headers starting with `Mozilla/`). Because Windows PowerShell 5.1 sends `Mozilla/5.0...` by default, always include `-UserAgent "NetReplay/1.0"` when calling `Invoke-RestMethod` on port 8474, or use `curl.exe`.
 
 ### 1. Check Toxiproxy Version
 ```powershell
-Invoke-RestMethod -Uri "http://127.0.0.1:8474/version"
+Invoke-RestMethod -Uri "http://127.0.0.1:8474/version" -UserAgent "NetReplay/1.0"
+# Or using curl.exe:
+curl.exe http://127.0.0.1:8474/version
 ```
 
 ### 2. List Configured Proxies
 ```powershell
-Invoke-RestMethod -Uri "http://127.0.0.1:8474/proxies" | ConvertTo-Json -Depth 4
+Invoke-RestMethod -Uri "http://127.0.0.1:8474/proxies" -UserAgent "NetReplay/1.0" | ConvertTo-Json -Depth 4
+# Or using curl.exe:
+curl.exe http://127.0.0.1:8474/proxies
 ```
 
 ### 3. Create the Proxy (if not already created)
@@ -262,7 +269,7 @@ $body = @{
     enabled = $true
 } | ConvertTo-Json
 
-Invoke-RestMethod -Uri "http://127.0.0.1:8474/proxies" -Method Post -Body $body -ContentType "application/json"
+Invoke-RestMethod -Uri "http://127.0.0.1:8474/proxies" -Method Post -Body $body -ContentType "application/json" -UserAgent "NetReplay/1.0"
 ```
 
 ### 4. Inject 500ms Downstream Latency
@@ -278,13 +285,14 @@ $toxic = @{
     }
 } | ConvertTo-Json
 
-Invoke-RestMethod -Uri "http://127.0.0.1:8474/proxies/netreplay-demo/toxics" -Method Post -Body $toxic -ContentType "application/json"
+Invoke-RestMethod -Uri "http://127.0.0.1:8474/proxies/netreplay-demo/toxics" -Method Post -Body $toxic -ContentType "application/json" -UserAgent "NetReplay/1.0"
 ```
 
 ### 5. Remove the Latency Toxic
 ```powershell
-Invoke-RestMethod -Uri "http://127.0.0.1:8474/proxies/netreplay-demo/toxics/latency_downstream" -Method Delete
+Invoke-RestMethod -Uri "http://127.0.0.1:8474/proxies/netreplay-demo/toxics/latency_downstream" -Method Delete -UserAgent "NetReplay/1.0"
 ```
+
 
 ---
 
@@ -386,7 +394,24 @@ Verified that injecting 500ms latency downstream produced an observed median lat
   ```
   *(The `POST /reset` endpoint removes all toxics and reenables all proxies).*
 
-### 4. Container Unhealthy / Startup Timeout
+### 4. `The underlying connection was closed: The connection was closed unexpectedly` (Port 8666)
+- **Cause**: Port 8666 is the Toxiproxy fault listener. When Toxiproxy first boots, it starts with an empty proxy list. Nothing listens on port 8666 until the `netreplay-demo` proxy is registered.
+- **Fix**: Run the smoke test or create the proxy once via the Toxiproxy API:
+  ```powershell
+  npm run test:smoke
+  ```
+  After `smoke-test.mjs` runs, `netreplay-demo` is registered and `http://127.0.0.1:8666` routes to `test-target:3000`.
+
+### 5. `Invoke-RestMethod : User agent not allowed` (Port 8474)
+- **Cause**: Toxiproxy includes built-in anti-CSRF protection that blocks browser user-agents (e.g. `Mozilla/5.0...`). Windows PowerShell 5.1 sends a `Mozilla/5.0...` user agent by default.
+- **Fix**: Provide a custom user-agent flag or use `curl.exe`:
+  ```powershell
+  Invoke-RestMethod -Uri "http://127.0.0.1:8474/proxies" -UserAgent "NetReplay/1.0"
+  # Or:
+  curl.exe http://127.0.0.1:8474/proxies
+  ```
+
+### 6. Container Unhealthy / Startup Timeout
 - Check service health status:
   ```powershell
   docker compose ps
@@ -395,6 +420,7 @@ Verified that injecting 500ms latency downstream produced an observed median lat
   ```powershell
   docker compose logs test-target
   ```
+
 
 ---
 
